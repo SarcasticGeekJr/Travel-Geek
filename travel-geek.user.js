@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.0.2
+// @version      1.0.3
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -39,7 +39,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.0.2"; // keep in sync with @version above
+  const VERSION = "1.0.3"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.user.js";
   const DEFAULT_HELPER = "https://travel-geek.sakthiramkumar12.workers.dev";
   const YATA = "https://yata.yt/api/v1/travel/export/";
@@ -699,7 +699,7 @@
         data ? `${list.length} items · stock seen ${data.fromHelper ? "by the helper" : "via " + esc(data.source)} · updated ${ago(data.at)} ago` : view.err ? "" : "Loading…"
       }</div>
       ${view.err && !data ? `<p class="err">Couldn't load stock (${esc(view.err)}). <button class="link" data-act="refresh">Retry</button></p>` : ""}
-      <div class="list">${list.length ? list.map(row).join("") : data ? `<p class="muted hint">${S.tab === "soon" ? "Nothing empty right now. " : ""}Nothing here with your filters. Try “All”, another country, or turn off “sell fast”.</p>` : `<div class="spin"></div>`}</div>
+      <div class="list">${list.length ? list.map(row).join("") : data ? `<p class="muted hint">${S.tab === "soon" ? "Nothing empty right now. " : ""}Nothing here with your filters. Try &ldquo;All&rdquo;, another country, or turn off &ldquo;sell fast&rdquo;.</p>` : `<div class="spin"></div>`}</div>
       <p class="foot muted">Profit = (sell price − ${+S.fee || 0}% fee − cost) × what you can carry. Sell price is the lower of market value and the cheapest bazaar. Stock comes from players visiting shops, so it can be a few minutes old.<br>Travel Geek v${VERSION}</p>`;
     $(".f-country").addEventListener("change", (e) => {
       S.country = e.target.value;
@@ -839,7 +839,7 @@
     const tog = (k, label) => `<label class="tog"><input type="checkbox" data-t="${k}" ${S.types[k] ? "checked" : ""}><span>${label}</span></label>`;
     body().innerHTML = `
       <div class="form">
-        ${!h ? `<p class="a">The alert helper isn't set up yet. Ask SarcasticGeekJr for the helper address and paste it under “Advanced” below.</p>` : ""}
+        ${!h ? `<p class="a">The alert helper isn't set up yet. Ask SarcasticGeekJr for the helper address and paste it under &ldquo;Advanced&rdquo; below.</p>` : ""}
         <label class="tog big"><input type="checkbox" class="on" ${S.alertsOn ? "checked" : ""} ${!h || !apiKey() ? "disabled" : ""}><b>Send alerts to my phone</b></label>
         ${!apiKey() ? `<p class="a small">Needs your Torn API key (⚙ Settings).</p>` : ""}
         ${
@@ -856,7 +856,7 @@
 
         <h3>What to alert me about</h3>
         ${tog("leave", "🛫 <b>Leave now</b>: you'd land right at a predicted restock")}
-        ${tog("ready", "⏰ <b>Get ready</b>: a few minutes before “leave now”")}
+        ${tog("ready", "⏰ <b>Get ready</b>: a few minutes before &ldquo;leave now&rdquo;")}
         <label class="tog">Minutes of warning<input class="num" data-a="lead" type="number" min="0" max="60" inputmode="numeric" value="${S.lead}"></label>
         ${tog("go", "✅ <b>Just restocked</b> and there'll still be stock when you land")}
         ${tog("soldout", "⚠️ <b>Sold out</b> while you're flying there (with a backup pick)")}
