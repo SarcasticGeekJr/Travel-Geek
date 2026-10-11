@@ -1,0 +1,26 @@
+# Shows whether the alert helper is running and what it sees. Run it from the Actions tab.
+name: Check helper
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Helper status
+        run: |
+          H=https://travel-geek.sakthiramkumar12.workers.dev
+          curl -sS -m 30 "$H/"; echo
+          curl -sS -m 30 "$H/api/state" -o state.json
+          python3 - <<'PY'
+          import json, time
+          d = json.load(open("state.json"))
+          now = int(time.time())
+          print("source:", d.get("source"), "| last run", now - d.get("tickAt", 0), "s ago | prices", now - d.get("pricesAt", 0), "s ago")
+          print("countries seen (seconds ago):", {k: (now - v if v else None) for k, v in d.get("updates", {}).items()})
+          items = d.get("items", [])
+          print("items:", len(items), "| with restock history:", sum(1 for i in items if (i.get("pred") or {}).get("n")))
+          for i in sorted(items, key=lambda i: -((i.get("sell") or 0) - i.get("cost", 0)))[:15]:
+              print(f'{i["key"]:9} {i["name"][:22]:22} qty {i["qty"]:>6} cost {i["cost"]:>9} sell {i.get("sell", 0):>9} {i.get("type", "")} ({i.get("speed")}) pred {i.get("pred")}')
+          PY
