@@ -7,7 +7,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { COUNTRIES, buildItems, observe, location, decideAlerts, pruneSent, cleanSettings } from "./core.js";
 
-const VERSION = "1.0.0";
+const VERSION = "1.0.1";
 const PRICES_EVERY = 10 * 60; // seconds
 const MAX_USERS = 40; // keeps a tick under the free plan's 50 outgoing requests
 
@@ -24,6 +24,7 @@ async function getJSON(url, ms = 12000) {
 export default {
   async fetch(req, env) {
     if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+    if (new URL(req.url).pathname === "/tick") return json({ error: "not found" }, 404); // only the schedule may run a tick
     const hub = env.HUB.get(env.HUB.idFromName("main"));
     return hub.fetch(req);
   },
@@ -71,17 +72,21 @@ export class Hub extends DurableObject {
 
   async state() {
     const t = now();
-    const [countries, prices, meta] = await Promise.all([this.countries(), this.ctx.storage.get("prices"), this.ctx.storage.get("meta")]);
+    const [countries, prices, meta, report] = await Promise.all([this.countries(), this.ctx.storage.get("prices"), this.ctx.storage.get("meta"), this.ctx.storage.get("report")]);
     const items = buildItems(countries, prices && prices.items, t);
     const updates = Object.fromEntries(Object.entries(countries).map(([cc, c]) => [cc, c.update || 0]));
-    return { version: VERSION, now: t, tickAt: (meta && meta.tickAt) || 0, source: (meta && meta.source) || "", pricesAt: (prices && prices.at) || 0, updates, items };
+    return { version: VERSION, now: t, report: report || null, tickAt: (meta && meta.tickAt) || 0, source: (meta && meta.source) || "", pricesAt: (prices && prices.at) || 0, updates, items };
   }
 
   async readStocks() {
     const [y, p] = await Promise.allSettled([getJSON(this.url.yata), getJSON(this.url.prom)]);
     const ys = y.status === "fulfilled" && y.value && y.value.stocks;
     const ps = p.status === "fulfilled" && p.value && p.value.stocks;
-    if (!ys && !ps) throw new Error("no stock source answered");
+    if (!ys && !ps) {
+      const e = new Error("no stock source answered");
+      e.details = { YATA: y.status === "rejected" ? y.reason.message : "no stocks in reply", Prometheus: p.status === "rejected" ? p.reason.message : "no stocks in reply" };
+      throw e;
+    }
     // For each country, use whichever source looked at it most recently.
     const out = {};
     for (const cc of Object.keys(COUNTRIES)) {
@@ -117,6 +122,7 @@ export class Hub extends DurableObject {
       await this.ctx.storage.put(writes);
     } catch (e) {
       report.errors.push("stocks: " + e.message);
+      for (const [name, err] of Object.entries(e.details || {})) report.errors.push(`${name}: ${err}`);
     }
 
     let prices = await this.ctx.storage.get("prices");
@@ -147,6 +153,7 @@ export class Hub extends DurableObject {
       Object.assign(f, { loc: u.loc, sent: u.sent, last: u.last, err: changed ? null : u.err, errs: changed ? 0 : u.errs, off: changed ? f.off : u.off });
     }
     await this.ctx.storage.put("users", fresh);
+    await this.ctx.storage.put("report", report); // shown in /api/state so problems are visible
     return report;
   }
 

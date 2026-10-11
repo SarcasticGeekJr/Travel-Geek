@@ -17,6 +17,7 @@ jobs:
           import json, time
           d = json.load(open("state.json"))
           now = int(time.time())
+          print("last run report:", d.get("report"))
           print("source:", d.get("source"), "| last run", now - d.get("tickAt", 0), "s ago | prices", now - d.get("pricesAt", 0), "s ago")
           print("countries seen (seconds ago):", {k: (now - v if v else None) for k, v in d.get("updates", {}).items()})
           items = d.get("items", [])
