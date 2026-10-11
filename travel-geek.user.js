@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.0.3
+// @version      1.0.4
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -39,7 +39,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.0.3"; // keep in sync with @version above
+  const VERSION = "1.0.4"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.user.js";
   const DEFAULT_HELPER = "https://travel-geek.sakthiramkumar12.workers.dev";
   const YATA = "https://yata.yt/api/v1/travel/export/";
@@ -284,6 +284,7 @@
   // Perk text looks like "+ 2 travel items" or "+ 10 travel item capacity"; flower/plushie-only perks are kept apart.
   function capacityFromPerks(perks) {
     const parts = [],
+      lines = [], // every travel-looking perk, shown in Your setup so wrong counts can be fixed
       extra = { flower: 0, plushie: 0 };
     let airstrip = false,
       wlt = false;
@@ -291,9 +292,10 @@
       if (!/_perks$/.test(group) || !Array.isArray(list)) continue;
       for (const raw of list) {
         const p = String(typeof raw === "string" ? raw : (raw && (raw.text || raw.description)) || "");
+        if (/travel|abroad|suitcase|luggage|airstrip|jet|carry|capacit/i.test(p)) lines.push(`${group.replace(/_perks$/, "")}: ${p.trim()}`);
         if (/airstrip/i.test(p)) airstrip = true;
         if (/private jet/i.test(p)) wlt = true;
-        if (!/travel|traveling|travelling/i.test(p) || !/item|capacit|carry/i.test(p)) continue;
+        if (!/travel|abroad|suitcase|luggage/i.test(p) || !/item|capacit|carry|suitcase|luggage/i.test(p)) continue;
         const n = +((p.match(/\+\s*(\d+)/) || p.match(/(\d+)/) || [])[1] || 0);
         if (!n) continue;
         if (/flower/i.test(p)) extra.flower += n;
@@ -301,7 +303,7 @@
         else parts.push({ n, text: p.trim(), group: group.replace(/_perks$/, "") });
       }
     }
-    return { parts, extra, airstrip, wlt };
+    return { parts, extra, airstrip, wlt, lines: lines.slice(0, 30) };
   }
   const METHOD_FROM_API = { standard: "standard", airstrip: "airstrip", private: "wlt", business: "business" };
 
@@ -811,6 +813,10 @@
         </select></label>
         <p class="muted small">Automatic uses the ticket from your last trip, or the best one your perks allow. Flight times and the base capacity follow this.</p>
         <button class="btn ghost" data-act="reloadMe">Re-check my perks</button>
+
+        <h3>What Torn told me</h3>
+        <div class="card small">${diagLines().map((l) => `<div>${esc(l)}</div>`).join("")}</div>
+        <button class="btn ghost" data-act="copyDiag">Copy this for SarcasticGeekJr</button>
       </div>`;
     $(".method").addEventListener("change", (e) => {
       S.method = e.target.value;
@@ -819,6 +825,16 @@
       syncSoon();
     });
     bindNums(renderSetup);
+  }
+  function diagLines() {
+    if (!apiKey()) return ["No API key yet."];
+    if (!me) return ["Not checked yet. Tap Re-check my perks."];
+    const out = [`Travel Geek v${VERSION}`, me.err ? `Torn API error: ${me.err}` : "Torn API: OK"];
+    out.push(me.perksOk === false ? "Perks: your key can't read them (needs a Limited or Full key)" : "Perks: readable");
+    out.push(`Last trip ticket from Torn: ${(me.travel && me.travel.method) || "not given"}`);
+    const lines = (me.cap && me.cap.lines) || [];
+    out.push(lines.length ? "Travel perks found:" : "Travel perks found: none");
+    return out.concat(lines.map((l) => "• " + l));
   }
   function bindNums(after) {
     $$("[data-n]").forEach((el) =>
@@ -1035,6 +1051,8 @@
         return renderSettings();
       case "copy":
         return toast((await copyText(el.dataset.v)) ? `Copied ${money(+el.dataset.v)}` : "Couldn't copy", "ok", 1500);
+      case "copyDiag":
+        return toast((await copyText(diagLines().join("\n") + `\nShown: ${myCapacity().total} items, ${METHOD_LABEL[myMethod()]}`)) ? "Copied. Paste it in the chat." : "Couldn't copy", "ok", 2500);
       case "copyTopic":
         return toast((await copyText(S.topic)) ? "Copied. Paste it in ntfy." : "Couldn't copy", "ok", 2000);
       case "remind": {
