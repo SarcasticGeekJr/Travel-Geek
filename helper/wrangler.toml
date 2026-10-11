@@ -1,0 +1,16 @@
+# Travel Geek helper (Cloudflare Workers, free plan)
+name = "travel-geek"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Runs every minute.
+[triggers]
+crons = ["* * * * *"]
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
