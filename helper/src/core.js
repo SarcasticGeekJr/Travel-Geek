@@ -32,11 +32,13 @@ export function countryCode(text) {
 export const flightSec = (cc, method) => ((COUNTRIES[cc] && COUNTRIES[cc].min[method]) || (COUNTRIES[cc] && COUNTRIES[cc].min.standard) || 0) * 60;
 
 // How quickly an item usually sells, from its Torn item type. Guns and armour are cheap abroad but slow to sell.
+// Types come from the Torn API (v2 torn/items): weapons are "Weapon" with a sub_type such as "Temporary".
 const FAST = ["plushie", "flower", "drug", "medical", "booster", "candy", "alcohol", "energy drink", "temporary"];
-const SLOW = ["primary", "secondary", "melee", "defensive", "armor", "clothing", "jewelry", "collectible", "artifact", "car"];
-export function speedOf(type) {
+const SLOW = ["weapon", "primary", "secondary", "melee", "defensive", "armor", "clothing", "jewelry", "collectible", "artifact", "car"];
+export function speedOf(type, subType) {
   const t = String(type || "").toLowerCase();
   if (!t) return "unknown";
+  if (t === "weapon" && String(subType || "").toLowerCase() === "temporary") return "fast";
   if (FAST.includes(t)) return "fast";
   if (SLOW.includes(t)) return "slow";
   return "medium";
@@ -144,12 +146,15 @@ export function extraCapFor(type, st) {
 }
 
 // Combine stored stock states and prices into one list for the script and the alert rules.
-export function buildItems(countries, prices, now) {
+// types: item id -> { t: type, st: sub_type } from the Torn API (TornW3B no longer sends types).
+export function buildItems(countries, prices, now, types) {
   const out = [];
   for (const [cc, c] of Object.entries(countries || {})) {
     if (!COUNTRIES[cc] || !c || !c.items) continue;
     for (const [id, s] of Object.entries(c.items)) {
       const p = prices && prices[id];
+      const ty = (types && types[id]) || {};
+      const type = ty.t || (p && p.type) || "";
       out.push({
         key: `${cc}:${id}`,
         cc,
@@ -164,8 +169,8 @@ export function buildItems(countries, prices, now) {
         lastRestock: s.lastRestock ?? null,
         amt: s.amts && s.amts.length ? s.amts[s.amts.length - 1] : 0,
         pred: predictRestock(s, now),
-        type: (p && p.type) || "",
-        speed: speedOf(p && p.type),
+        type,
+        speed: speedOf(type, ty.st),
         mv: (p && p.mv) || 0,
         low: (p && p.low) || 0,
         sell: sellPrice(p),

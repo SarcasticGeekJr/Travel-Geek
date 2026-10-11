@@ -7,8 +7,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { COUNTRIES, buildItems, observe, location, decideAlerts, pruneSent, cleanSettings } from "./core.js";
 
-const VERSION = "1.0.1";
+const VERSION = "1.0.2";
 const PRICES_EVERY = 10 * 60; // seconds
+const TYPES_EVERY = 24 * 3600;
 const MAX_USERS = 40; // keeps a tick under the free plan's 50 outgoing requests
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -72,8 +73,14 @@ export class Hub extends DurableObject {
 
   async state() {
     const t = now();
-    const [countries, prices, meta, report] = await Promise.all([this.countries(), this.ctx.storage.get("prices"), this.ctx.storage.get("meta"), this.ctx.storage.get("report")]);
-    const items = buildItems(countries, prices && prices.items, t);
+    const [countries, prices, meta, report, types] = await Promise.all([
+      this.countries(),
+      this.ctx.storage.get("prices"),
+      this.ctx.storage.get("meta"),
+      this.ctx.storage.get("report"),
+      this.ctx.storage.get("types"),
+    ]);
+    const items = buildItems(countries, prices && prices.items, t, types && types.map);
     const updates = Object.fromEntries(Object.entries(countries).map(([cc, c]) => [cc, c.update || 0]));
     return { version: VERSION, now: t, report: report || null, tickAt: (meta && meta.tickAt) || 0, source: (meta && meta.source) || "", pricesAt: (prices && prices.at) || 0, updates, items };
   }
@@ -139,9 +146,24 @@ export class Hub extends DurableObject {
       }
     }
 
-    const items = buildItems(countries, prices && prices.items, t);
     const users = (await this.ctx.storage.get("users")) || {};
     const active = Object.values(users).filter((u) => !u.off).slice(0, MAX_USERS);
+
+    // Item types (to tell fast sellers from guns and armour), once a day, with a signed-up player's key.
+    let types = await this.ctx.storage.get("types");
+    if (active.length && (!types || t - types.at >= TYPES_EVERY)) {
+      try {
+        const u = active[Math.floor(t / 60) % active.length];
+        const d = await this.torn("/v2/torn/items", u.key);
+        const wanted = new Set(Object.values(countries).flatMap((c) => Object.keys(c.items || {})));
+        const map = {};
+        for (const i of d.items || []) if (wanted.has(String(i.id))) map[i.id] = { t: i.type || "", st: i.sub_type || "" };
+        if (Object.keys(map).length) await this.ctx.storage.put("types", (types = { at: t, map }));
+      } catch (e) {
+        report.errors.push("types: " + e.message);
+      }
+    }
+    const items = buildItems(countries, prices && prices.items, t, types && types.map);
     await Promise.all(active.map((u) => this.checkUser(u, items, t, report)));
     // Someone may have signed up or changed settings while we were waiting on the network:
     // re-read and only write back what this tick learned.

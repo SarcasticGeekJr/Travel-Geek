@@ -25,6 +25,3 @@ jobs:
           for i in sorted(items, key=lambda i: -((i.get("sell") or 0) - i.get("cost", 0)))[:15]:
               print(f'{i["key"]:9} {i["name"][:22]:22} qty {i["qty"]:>6} cost {i["cost"]:>9} sell {i.get("sell", 0):>9} {i.get("type", "")} ({i.get("speed")}) pred {i.get("pred")}')
           PY
-      - name: TornW3B item format
-        run: |
-          curl -sS -m 30 https://weav3r.dev/api/marketplace | python3 -c 'import json,sys;d=json.load(sys.stdin);print(list(d.keys()));i=d["items"];print(len(i));print(json.dumps(i[:3]));print(json.dumps([x for x in i if x.get("item_id") in (206,258,384)]))'

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.0.1
+// @version      1.0.2
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -39,7 +39,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.0.1"; // keep in sync with @version above
+  const VERSION = "1.0.2"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.user.js";
   const DEFAULT_HELPER = "https://travel-geek.sakthiramkumar12.workers.dev";
   const YATA = "https://yata.yt/api/v1/travel/export/";
@@ -66,10 +66,12 @@
   const METHOD_LABEL = { standard: "Standard", airstrip: "Airstrip", wlt: "Private jet (WLT)", business: "Business class" };
   // Base items you can carry: 10, or 15 with an airstrip, the WLT benefit or a Business class ticket (Torn wiki).
   const BASE_CAP = { standard: 10, airstrip: 15, wlt: 15, business: 15 };
+  // Item types come from the Torn API (weapons are "Weapon" with a sub_type such as "Temporary").
   const FAST = ["plushie", "flower", "drug", "medical", "booster", "candy", "alcohol", "energy drink", "temporary"];
-  const SLOW = ["primary", "secondary", "melee", "defensive", "armor", "clothing", "jewelry", "collectible", "artifact", "car"];
-  const speedOf = (type) => {
+  const SLOW = ["weapon", "primary", "secondary", "melee", "defensive", "armor", "clothing", "jewelry", "collectible", "artifact", "car"];
+  const speedOf = (type, sub) => {
     const t = String(type || "").toLowerCase();
+    if (t === "weapon" && String(sub || "").toLowerCase() === "temporary") return "fast";
     return !t ? "unknown" : FAST.includes(t) ? "fast" : SLOW.includes(t) ? "slow" : "medium";
   };
 
@@ -434,6 +436,26 @@
     return data;
   }
 
+  // Item types, once a day with your own key, for items the stock data didn't label.
+  let types = store.get("types", null); // { at, map: { id: [type, sub_type] } }
+  async function loadTypes() {
+    if (!apiKey() || (types && nowS() - types.at < 86400)) return;
+    try {
+      const d = await torn("/v2/torn/items", 60 * MIN);
+      const map = {};
+      for (const i of d.items || []) map[i.id] = [i.type || "", i.sub_type || ""];
+      types = { at: nowS(), map };
+      store.set("types", types);
+    } catch {}
+  }
+  function labelTypes() {
+    if (!data || !types) return;
+    for (const it of data.items) {
+      const t = types.map[it.id];
+      if (!it.type && t) (it.type = t[0]), (it.speed = speedOf(t[0], t[1]));
+    }
+  }
+
   // Your numbers for one item.
   function personal(it) {
     const cap = myCapacity().total + extraFor(it.type);
@@ -603,7 +625,8 @@
     $("[data-act=refresh]").classList.add("spinning");
     view.err = null;
     try {
-      await Promise.all([loadData(force), loadMe(force)]);
+      await Promise.all([loadData(force), loadMe(force), loadTypes()]);
+      labelTypes();
     } catch (e) {
       view.err = e.message;
     }
@@ -1140,6 +1163,7 @@
   function boot() {
     document.body.appendChild(host);
     setupDrag();
+    labelTypes();
     updateBadge();
     refresh(false).then(() => syncSoon());
     setInterval(() => {

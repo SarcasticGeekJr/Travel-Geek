@@ -84,6 +84,9 @@ test("flight times, country names, item speed", () => {
   assert.equal(speedOf("Plushie"), "fast");
   assert.equal(speedOf("Primary"), "slow");
   assert.equal(speedOf("Enhancer"), "medium");
+  assert.equal(speedOf("Weapon", "Temporary"), "fast");
+  assert.equal(speedOf("Weapon", "Primary"), "slow");
+  assert.equal(speedOf("Armor"), "slow");
 });
 
 test("player location from the Torn API", () => {
@@ -224,4 +227,11 @@ test("no in-stock alert for an item that wasn't just restocked", () => {
   assert.equal(decideAlerts({ items, st: ME, loc: { where: "torn" }, sent: {}, now: T0 }).alerts.length, 0);
   const old = world({ qty: 1000, rate: 100, lastRestock: T0 - 2 * H });
   assert.equal(decideAlerts({ items: old, st: ME, loc: { where: "torn" }, sent: {}, now: T0 }).alerts.length, 0);
+});
+
+test("item types from the Torn API win over the price source", () => {
+  const countries = { mex: { update: 1, items: { 21: { name: "Dual 92G Berettas", qty: 5, cost: 85, at: 1, cycles: [], amts: [] } } } };
+  const items = buildItems(countries, { 21: { mv: 4000000, low: 0, type: "" } }, 2, { 21: { t: "Weapon", st: "Secondary" } });
+  assert.equal(items[0].type, "Weapon");
+  assert.equal(items[0].speed, "slow");
 });
