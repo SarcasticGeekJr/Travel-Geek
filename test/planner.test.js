@@ -121,3 +121,23 @@ test("fast enough for a phone", () => {
   PLAN.make(base(items, { end: NOW + 8 * H, tickets: 2 }));
   assert.ok(Date.now() - t0 < 1500, "took " + (Date.now() - t0) + "ms");
 });
+
+test("plans hours ahead by projecting restock cycles (back from the UK at 10:30, 8 hours)", () => {
+  // Mexico plushies sell out in ~1h and are empty ~30 min; Japan Xanax sells out in ~30 min, empty ~2h.
+  const items = [
+    item({ cc: "mex", id: 258, name: "Jaguar Plushie", qty: 300, cost: 10000, sell: 60000, rate: 600, amtTypical: 600, emptyAvg: 30 * M, emptyN: 8 }),
+    item({ cc: "jap", id: 206, name: "Xanax", qty: 0, cost: 750000, sell: 900000, type: "Drug", rate: 2000, amtTypical: 1000, emptyAvg: 2 * H, emptyN: 8,
+      pred: { at: NOW + 20 * M, from: NOW + 15 * M, to: NOW + 25 * M, conf: "high", pct: 80, avg: 2 * H } }),
+  ];
+  const start = NOW + 2.5 * H;
+  const r = PLAN.make(base(items, { start, end: start + 8 * H, method: "standard" }));
+  assert.ok(r.best, "finds a plan");
+  assert.ok(r.best.legs.length >= 2, "several trips: " + r.best.legs.length);
+  assert.ok(r.best.legs.every((g) => g.depart >= start && g.back <= start + 8 * H));
+  // Every leg lands while stock is there, never before a projected restock.
+  for (const g of r.best.legs) assert.ok(g.buys.every((b) => b.p > 0));
+  // Later cycles are less certain than the next one.
+  const near = PLAN.availability(items[1], NOW + 22 * M, NOW).p;
+  const far = PLAN.availability(items[1], NOW + 22 * M + 3 * (2 * H + 30 * M), NOW).p;
+  assert.ok(far > 0 && far < near, `near ${near} far ${far}`);
+});

@@ -7,7 +7,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { COUNTRIES, buildItems, observe, location, decideAlerts, pruneSent, cleanSettings, cleanPlan, countryCode, crowdEntries, crowdHash } from "./core.js";
 
-const VERSION = "1.2.0";
+const VERSION = "1.2.1";
 const PRICES_EVERY = 10 * 60; // seconds
 const TYPES_EVERY = 24 * 3600;
 const MAX_USERS = 40; // keeps a tick under the free plan's 50 outgoing requests

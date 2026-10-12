@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.2.0
+// @version      1.2.1
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -39,7 +39,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.2.0"; // keep in sync with @version above
+  const VERSION = "1.2.1"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.user.js";
   const DEFAULT_HELPER = "https://travel-geek.sakthiramkumar12.workers.dev";
   const YATA = "https://yata.yt/api/v1/travel/export/";
@@ -535,11 +535,31 @@
   const PLAN = (() => {
     const SHOP_TIME = 120; // seconds spent buying before flying home
     const FRESH = 45 * 60;
-    const BEAM = 40;
+    const BEAM = 30;
     // Standard ticket prices (Torn wiki). Airstrip and the WLT jet fly free; Business uses a ticket.
     const TICKET = { mex: 6500, cay: 10000, can: 9000, haw: 11000, uni: 18000, arg: 21000, swi: 27000, jap: 32000, chi: 35000, uae: 32000, sou: 40000 };
 
-    // Chance that the item has been restocked by time a, and how many should be left then.
+    // Shops cycle: stock sells out, stays empty for a while, restocks, sells out again. Project that forward
+    // so trips hours from now still know roughly when each item will be back.
+    // Returns { first, cycle, size, perSec, sure, window } or null when there isn't enough history.
+    function cycleOf(it, now) {
+      const perSec = (it.rate || 0) / 3600;
+      const pr = it.pred;
+      const emptyFor = it.emptyAvg || (pr && pr.avg) || 0;
+      const size = it.amtTypical || it.amt || 0;
+      const sure = pr && pr.pct ? pr.pct / 100 : it.emptyN >= 3 ? 0.5 : 0.3;
+      const window = pr && pr.to && pr.at ? Math.max(300, pr.to - pr.at) : 900;
+      let first = 0;
+      if (it.qty > 0) {
+        if (!perSec || !emptyFor) return null;
+        first = it.updated + it.qty / perSec + emptyFor; // sells out, then usually back after this long
+      } else if (pr && pr.at && !pr.overdue) first = pr.at;
+      else return null;
+      const sellOut = perSec && size ? size / perSec : 0;
+      return { first, cycle: sellOut && emptyFor ? sellOut + emptyFor : 0, size, perSec, sure, window };
+    }
+
+    // Chance that the item is in stock when we land at time a, and how many should be left.
     // Never waiting abroad means we only count stock that is there when we land.
     function availability(it, a, now) {
       const perSec = (it.rate || 0) / 3600;
@@ -547,22 +567,23 @@
         const stale = now - it.updated > FRESH;
         const left = it.qty - perSec * Math.max(0, a - it.updated);
         if (left >= 1) return { avail: Math.floor(left), p: stale ? 0.6 : 0.95 };
+      } else {
         const pr = it.pred;
-        if (!perSec || !pr || !pr.avg) return { avail: 0, p: 0 };
-        const restock = it.updated + it.qty / perSec + pr.avg; // runs out, then usually back after this long
-        if (a < restock) return { avail: 0, p: 0 };
-        return { avail: Math.floor((it.amtTypical || it.amt || 200) - perSec * (a - restock)), p: 0.35 };
+        if (pr && pr.overdue) return { avail: it.amtTypical || it.amt || 100, p: 0.2 };
       }
-      const pr = it.pred;
-      if (!pr || !pr.at || pr.conf === "none") return { avail: 0, p: 0 };
-      const sure = (pr.pct || 30) / 100;
-      if (pr.overdue) return { avail: it.amtTypical || it.amt || 100, p: 0.2 };
-      if (a < pr.from) return { avail: 0, p: 0 };
-      const frac = pr.to > pr.from ? Math.min(1, (a - pr.from) / (pr.to - pr.from)) : 1;
-      const size = it.amtTypical || it.amt || 0;
-      const sold = perSec * Math.max(0, a - pr.at);
-      const avail = size ? Math.floor(size - sold) : 999; // unknown size: assume enough
-      return { avail: Math.max(0, avail), p: sure * (0.15 + 0.85 * frac) };
+      const c = cycleOf(it, now);
+      if (!c) return { avail: 0, p: 0 };
+      // Which restock would we land after? The first one, or a later one if the shop keeps cycling.
+      let k = 0;
+      if (c.cycle && a > c.first + c.cycle) k = Math.floor((a - c.first) / c.cycle);
+      const r = c.first + k * c.cycle;
+      const spread = c.window * (1 + k); // later restocks are less certain
+      if (a < r - spread) return { avail: 0, p: 0 };
+      const frac = Math.min(1, (a - (r - spread)) / (2 * spread));
+      const sold = c.perSec * Math.max(0, a - r);
+      const avail = c.size ? Math.floor(c.size - sold) : 999; // unknown size: assume enough
+      if (avail < 1) return { avail: 0, p: 0 };
+      return { avail, p: c.sure * Math.pow(0.8, k) * (0.15 + 0.85 * frac) };
     }
 
     // Best mix to buy in one country: fills the carrying slots, within the budget.
@@ -603,7 +624,11 @@
       const back = land + SHOP_TIME + fl;
       const cands = [];
       for (const it of ctx.byCountry[cc] || []) {
-        if (used.has(it.key)) continue;
+        // The same item again only after its shop has had time to sell out and restock.
+        if (used.has(it.key)) {
+          const c = cycleOf(it, ctx.now);
+          if (!c || !c.cycle || land < used.get(it.key) + c.cycle * 0.9) continue;
+        }
         const unit = Math.floor(it.sell * (1 - ctx.fee / 100)) - it.cost;
         if (!(unit > 0) || !it.cost) continue;
         const { avail, p } = availability(it, land, ctx.now);
@@ -630,24 +655,29 @@
       };
     }
 
-    // Departure times worth trying for a country after time t: now, and the times that land at each restock.
+    // Departure times worth trying for a country after time t: now, and the times that land at each
+    // projected restock (this one and the following cycles) inside the window.
     function departures(ctx, cc, method, t, end) {
       const fl = ctx.flights[cc][method] * 60;
       const out = new Set([t]);
+      const fits = (d) => d >= t && d + 2 * fl + SHOP_TIME <= end;
       for (const it of ctx.byCountry[cc] || []) {
-        const pr = it.pred;
-        if (it.qty > 0 || !pr || !pr.at || pr.overdue) continue;
-        const w = Math.max(300, pr.to - pr.at);
-        for (const k of [0, 0.25, 0.5, 1]) {
-          const d = Math.round((pr.at + k * w - fl) / 60) * 60;
-          if (d >= t && d + 2 * fl + SHOP_TIME <= end) out.add(d);
+        const c = cycleOf(it, ctx.now);
+        if (!c) continue;
+        for (let k = 0, r = c.first; r - fl <= end && k < 12; k++, r += c.cycle) {
+          const w = c.window * (1 + k);
+          for (const f of [0, 0.25, 0.5, 1]) {
+            const d = Math.round((r + f * w - fl) / 60) * 60;
+            if (fits(d)) out.add(d);
+          }
+          if (!c.cycle) break;
         }
       }
-      return [...out].filter((d) => d + 2 * fl + SHOP_TIME <= end).sort((x, y) => x - y).slice(0, 6);
+      return [...out].filter((d) => d + 2 * fl + SHOP_TIME <= end).sort((x, y) => x - y).slice(0, 8);
     }
 
     function search(ctx, start, end, money, tickets, sellMode) {
-      let beam = [{ t: start, money, tickets, used: new Set(), legs: [], best: 0, exp: 0 }];
+      let beam = [{ t: start, money, tickets, used: new Map(), legs: [], best: 0, exp: 0 }];
       const done = [];
       for (let depth = 0; depth < 12 && beam.length; depth++) {
         const next = [];
@@ -660,8 +690,8 @@
               for (const d of departures(ctx, cc, method, st.t, end)) {
                 const g = leg(ctx, cc, d, method, st.money, st.used);
                 if (!g || g.exp <= 0) continue;
-                const used = new Set(st.used);
-                g.buys.forEach((b) => used.add(b.key));
+                const used = new Map(st.used);
+                g.buys.forEach((b) => used.set(b.key, g.land));
                 const sales = g.buys.reduce((t, b) => t + b.units * b.cost, 0) + Math.max(0, g.exp + g.ticket);
                 next.push({
                   t: g.back,
@@ -1203,7 +1233,7 @@
     let res = "";
     if (!data) res = `<div class="spin"></div>`;
     else if (!o || !o.best)
-      res = `<p class="muted hint">No profitable trip fits ${o && o.window ? `between ${clock(o.window.start)} and ${clock(o.window.end)}` : "right now"}. Try a longer time, more money, turning off &ldquo;sell fast&rdquo; in Items, or a Business ticket.</p>`;
+      res = `<p class="muted hint">${o && o.window && o.window.note ? esc(o.window.note) + " " : ""}No profitable trip fits ${o && o.window ? `between ${clock(o.window.start)} and ${clock(o.window.end)}` : "right now"}. Try a longer time, more money, turning off &ldquo;sell fast&rdquo; in Items, or a Business ticket.</p>`;
     else {
       const b = o.best;
       const cashAll = S.sellMode === "sell" ? Math.max(...b.legs.map((g) => g.cash)) : b.legs.reduce((t, g) => t + g.cash, 0);

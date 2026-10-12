@@ -256,6 +256,9 @@ export function buildItems(countries, prices, now, types) {
         lastRestock: s.lastRestock ?? null,
         amt: s.amts && s.amts.length ? s.amts[s.amts.length - 1] : 0,
         amtTypical: s.amts && s.amts.length ? quant(s.amts.slice(-10), 0.5) : 0,
+        // How long it usually stays empty, also while it's in stock, so plans can look several restocks ahead.
+        emptyAvg: s.cycles && s.cycles.length ? quant(s.cycles.slice(-10), 0.5) : 0,
+        emptyN: (s.cycles || []).length,
         pred: predictRestock(s, now),
         type,
         speed: speedOf(type, ty.st, p && p.bz),
