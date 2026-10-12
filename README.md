@@ -14,6 +14,21 @@ https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.u
 
 **Tampermonkey:** open the link above and install.
 
+## 🧭 Trip planner (opens first)
+
+Tells you which trips to make, in order, for the most profit in the time you have, with the money you can actually use.
+
+- **Round trips only** (Torn → country → Torn), timed to **land at a restock**. It never plans for you to wait abroad.
+- **Start:** now, or a time you pick. If you're abroad, flying or in hospital, it starts when you're back.
+- **Play for:** 4 hours by default, or 1–8 hours, or until a time you choose.
+- **Money I can use:** your wallet, vault, stocks and faction balance (points optional), read from the Torn API. Untick any of them, set a "don't spend more than", or type your own number. Plans only buy what you can afford, and each trip says where to get the cash first ("get $7.3m: Vault $6.1m, Faction $1.2m"). It never moves money for you.
+- **Between trips:** "Don't sell" (pay for every trip from today's money) or "Sell" (profits pay for the next trip).
+- **Business tickets I have:** 0 by default. Enter how many you have and it uses one only on a trip where the extra profit beats the ticket's price.
+- **Expected vs best case:** "best case" assumes every restock arrives as predicted; "expected" counts how often predictions have really been right. Plans are ranked by expected profit.
+- **Live:** countdowns tick every second and the plan is recalculated every minute. If the best plan changes, it says why.
+- **⏰ Remind me for each trip** (Torn PDA) and **🔔 Follow this plan** (a phone alert before each departure).
+- **"With $X you'd make +$Y more"** when more money would help.
+
 ## What it does
 
 - **✈️ button** on every Torn page. The green number on it = good runs you could start right now.
@@ -23,6 +38,8 @@ https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.u
 - **Cash to take:** the exact amount, so you don't carry extra money abroad.
 - **⏰ Remind me** (Torn PDA): a phone reminder at your leave time.
 - **⭐ Watch** items to always see them and always get alerts; **hide** items you never want.
+- **In the foreign shop:** a **Fill** button next to Buy types the right amount into the box (your plan's amount, limited by room, stock and cash). You still press Buy yourself. Items in your plan get a green outline. The shop also tells Travel Geek your exact capacity.
+- **How accurate?** Every restock the helper sees is checked against what it predicted. Each item shows its hit rate ("7 of 9 within 10 min") and which method works best for it (recent restocks, all restocks, last 3, or same time of day).
 
 ## Phone alerts (ntfy)
 
@@ -47,6 +64,8 @@ When phone alerts are on, your key is stored on the helper and used about once a
 |---|---|---|---|---|
 | Status, travel | Helper (only while alerts are on) | No | Time alerts to where you are | Limited (Public works with less detail) |
 | Perks | This device only | No | Work out what you can carry | Limited |
+| Money (wallet, vault, networth, faction balance) | This device only | No | Plan within the money you can use | Limited |
+| Shop stock you see abroad | Helper (stock only) | Feeds everyone's predictions | Exact restock times | Your key is used once to check you're in that country |
 
 ## Good to know
 
@@ -59,4 +78,5 @@ When phone alerts are on, your key is stored on the helper and used about once a
 The helper lives in `helper/` (a Cloudflare Worker, free plan). Pushing changes to `helper/` on `main` tests and deploys it with GitHub Actions, using the repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 
 - Tests: `cd helper && npm ci && npm test`
-- Endpoints: `GET /api/state` (stock and predictions), `POST /api/user` (turn alerts on or change settings), `DELETE /api/user`, `POST /api/test`.
+- Endpoints: `GET /api/state` (stock and predictions), `POST /api/user` (turn alerts on or change settings), `DELETE /api/user`, `POST /api/test`, `POST /api/plan` (follow a plan), `POST /api/report` (exact stock from a player in the shop).
+- Planner tests: `node --test test/*.test.js` (the planner block inside the script is pure and tested on its own).

@@ -5,9 +5,9 @@
 // It only reads data and sends notifications. It never acts in the game.
 
 import { DurableObject } from "cloudflare:workers";
-import { COUNTRIES, buildItems, observe, location, decideAlerts, pruneSent, cleanSettings } from "./core.js";
+import { COUNTRIES, buildItems, observe, location, decideAlerts, pruneSent, cleanSettings, cleanPlan, countryCode } from "./core.js";
 
-const VERSION = "1.0.2";
+const VERSION = "1.1.0";
 const PRICES_EVERY = 10 * 60; // seconds
 const TYPES_EVERY = 24 * 3600;
 const MAX_USERS = 40; // keeps a tick under the free plan's 50 outgoing requests
@@ -56,6 +56,8 @@ export class Hub extends DurableObject {
       if (u.pathname === "/api/user" && req.method === "POST") return json(await this.upsertUser(await req.json()));
       if (u.pathname === "/api/user" && req.method === "DELETE") return json(await this.deleteUser(await req.json()));
       if (u.pathname === "/api/test" && req.method === "POST") return json(await this.test(await req.json()));
+      if (u.pathname === "/api/report" && req.method === "POST") return json(await this.report(await req.json()));
+      if (u.pathname === "/api/plan" && req.method === "POST") return json(await this.setPlan(await req.json()));
       if (u.pathname === "/" || u.pathname === "/api") return json({ name: "Travel Geek helper", version: VERSION, ok: true });
       return json({ error: "not found" }, 404);
     } catch (e) {
@@ -114,8 +116,8 @@ export class Hub extends DurableObject {
       const { stocks, source } = await this.readStocks();
       const writes = {};
       for (const [cc, c] of Object.entries(stocks)) {
-        const prev = countries[cc];
-        if (c.update <= (prev.update || 0)) continue;
+        if (c.update <= (countries[cc].update || 0)) continue;
+        const prev = (await this.ctx.storage.get("c:" + cc)) || countries[cc]; // a shop report may have landed meanwhile
         const items = { ...prev.items };
         for (const s of c.stocks || []) {
           if (!s || !s.id) continue;
@@ -173,6 +175,7 @@ export class Hub extends DurableObject {
       if (!f) continue;
       const changed = (f.updated || 0) > t;
       Object.assign(f, { loc: u.loc, sent: u.sent, last: u.last, err: changed ? null : u.err, errs: changed ? 0 : u.errs, off: changed ? f.off : u.off });
+      if (f.plan && !(f.plan.legs || []).some((g) => (g.back || g.land || g.depart) + 600 >= t)) f.plan = null; // finished
     }
     await this.ctx.storage.put("users", fresh);
     await this.ctx.storage.put("report", report); // shown in /api/state so problems are visible
@@ -216,7 +219,7 @@ export class Hub extends DurableObject {
     const loc = location(d, t);
     u.loc = { ...loc, at: t };
     const sent = pruneSent(u.sent, t);
-    const { alerts, suppressed } = decideAlerts({ items, st: u.settings, loc, sent, now: t });
+    const { alerts, suppressed } = decideAlerts({ items, st: u.settings, loc, sent, now: t, plan: u.plan });
     for (const k of suppressed) sent[k] = t;
     for (const a of alerts) {
       try {
@@ -267,6 +270,50 @@ export class Hub extends DurableObject {
     await this.ctx.storage.put("users", users);
     const u = users[me.player_id];
     return { ok: true, id: u.id, name: u.name, loc: u.loc || null, last: u.last || [] };
+  }
+
+  // A player standing in a foreign shop reports exactly what it has. Checked against their status, so only
+  // someone really in that country can report it, at most once a minute.
+  async report(b) {
+    const key = String((b && b.key) || "").trim();
+    if (!/^[A-Za-z0-9]{16}$/.test(key)) throw new Error("API key needed");
+    const cc = String((b && b.cc) || "");
+    if (!COUNTRIES[cc]) throw new Error("unknown country");
+    const list = (Array.isArray(b.items) ? b.items : []).slice(0, 60).filter((i) => i && +i.id > 0 && Number.isFinite(+i.qty) && +i.qty >= 0);
+    if (!list.length) throw new Error("no items");
+    // At most one accepted report a minute per player, and one check every 20 seconds, so it can't burn their API calls.
+    this.lastReport = this.lastReport || new Map();
+    const last = this.lastReport.get(key) || { ok: 0, tried: 0 };
+    if (now() - last.ok < 60 || now() - last.tried < 20) return { ok: true, skipped: "too soon" };
+    last.tried = now();
+    this.lastReport.set(key, last);
+    const me = await this.torn("/user/?selections=basic", key);
+    const st = me.status || {};
+    if (st.state !== "Abroad" || countryCode(st.description) !== cc) throw new Error("you need to be in that country");
+    last.ok = now();
+    const t = now();
+    const c = (await this.ctx.storage.get("c:" + cc)) || { update: 0, items: {} };
+    const items = { ...c.items };
+    let n = 0;
+    for (const i of list) {
+      const prev = items[i.id];
+      if (!prev) continue; // only items the stock sources know, so a bad report can't add junk
+      items[i.id] = observe(prev, { qty: Math.round(+i.qty), cost: Math.round(+i.cost) || prev.cost, name: prev.name, at: t, precise: true });
+      n++;
+    }
+    await this.ctx.storage.put("c:" + cc, { ...c, items });
+    return { ok: true, updated: n };
+  }
+
+  async setPlan(b) {
+    const key = String((b && b.key) || "").trim();
+    const users = (await this.ctx.storage.get("users")) || {};
+    const u = Object.values(users).find((x) => x.key === key);
+    if (!u) throw new Error("Turn phone alerts on first.");
+    u.plan = b.plan ? cleanPlan(b.plan) : null;
+    u.updated = now();
+    await this.ctx.storage.put("users", users);
+    return { ok: true, following: !!u.plan, legs: u.plan ? u.plan.legs.length : 0 };
   }
 
   async deleteUser(b) {

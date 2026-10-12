@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.0.4
+// @version      1.1.0
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -39,7 +39,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.0.4"; // keep in sync with @version above
+  const VERSION = "1.1.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.user.js";
   const DEFAULT_HELPER = "https://travel-geek.sakthiramkumar12.workers.dev";
   const YATA = "https://yata.yt/api/v1/travel/export/";
@@ -99,6 +99,17 @@
     quiet: { on: false, from: 23 * 60, to: 7 * 60 },
     types: { leave: true, ready: true, go: true, soldout: true, restock: true, cheap: true },
     fab: null,
+    // trip planner
+    page: "plan", // plan | items
+    planHours: 4, // 0 = until planUntil
+    planUntil: null, // minutes after midnight, local time
+    planStart: null, // null = now, else minutes after midnight, local time
+    sellMode: "hold", // hold = don't sell between trips, sell = sell between trips
+    tickets: 0, // Business Class Tickets you have
+    money: { wallet: true, vault: true, faction: true, stocks: true, points: false, limit: 0, manual: 0 },
+    moneyOrder: ["vault", "faction", "stocks", "points"],
+    capSeen: {}, // ticket -> { cap, at }, read from the foreign shop
+    follow: null, // the plan sent to the helper for alerts
   };
 
   // ---------------------------------------------------------------- storage
@@ -120,6 +131,7 @@
   const S = Object.assign({}, DEFAULTS, store.get("settings", {}));
   S.types = Object.assign({}, DEFAULTS.types, S.types);
   S.quiet = Object.assign({}, DEFAULTS.quiet, S.quiet);
+  S.money = Object.assign({}, DEFAULTS.money, S.money);
   const save = () => store.set("settings", S);
   const apiKey = () => (S.apiKey || (PDA_KEY.includes("#") ? "" : PDA_KEY)).trim();
   const helperUrl = () => (S.helper || DEFAULT_HELPER).trim().replace(/\/+$/, "");
@@ -314,7 +326,7 @@
       let d,
         perksOk = true;
       try {
-        d = await torn("/user/?selections=basic,perks,travel", 2 * MIN, force);
+        d = await torn("/user/?selections=basic,perks,travel,money", 2 * MIN, force);
       } catch (e) {
         if (e.code !== 16) throw e;
         perksOk = false; // key level too low for perks/travel
@@ -331,6 +343,11 @@
         cap,
         lastMethod: lastMethod || (me && me.lastMethod) || null,
         perksOk,
+        money: Object.assign({}, me && me.money, {
+          wallet: +(d.money_onhand ?? (d.money && d.money.wallet) ?? (me && me.money && me.money.wallet) ?? 0),
+          vault: +(d.vault_amount ?? (d.money && d.money.vault) ?? (me && me.money && me.money.vault) ?? 0),
+          walletAt: d.money_onhand != null ? nowS() : me && me.money && me.money.walletAt,
+        }),
       };
       store.set("me", me);
       syncSoon(); // capacity or ticket may have changed
@@ -339,6 +356,56 @@
     }
     return me;
   }
+  // Money in other places: stocks and points from your networth, and your faction balance. Every 5 minutes.
+  async function loadMoney(force) {
+    if (!apiKey() || !me || (!force && me.money && nowS() - (me.money.otherAt || 0) < 300)) return;
+    const m = Object.assign({}, me.money);
+    try {
+      const d = await torn("/v2/user/personalstats?cat=networth", 4 * MIN, force);
+      const find = (o) => (o && typeof o === "object" ? ("stock_market" in o ? o : Object.values(o).map(find).find(Boolean)) : null);
+      const nw = find(d);
+      if (nw) Object.assign(m, { stocks: +nw.stock_market || 0, pointsValue: +nw.points || 0, vaultNw: +nw.vaults || 0, nwOk: true });
+    } catch (e) {
+      m.nwErr = e.message;
+    }
+    try {
+      const f = await torn("/v2/user/factionbalance", 4 * MIN, force);
+      const b = f.factionBalance || f.balance || f.faction_balance || {};
+      m.faction = +(b.money ?? 0);
+      m.factionOk = true;
+    } catch (e) {
+      m.factionErr = e.message;
+    }
+    m.otherAt = nowS();
+    me.money = m;
+    store.set("me", me);
+  }
+  // Money the planner may use, and where it is. Wallet first; the rest in your chosen order.
+  function usableMoney() {
+    const m = (me && me.money) || {};
+    const pick = S.money;
+    const names = { vault: "Vault", faction: "Faction", stocks: "Stocks", points: "Points" };
+    const amounts = { vault: m.vault || m.vaultNw || 0, faction: m.faction || 0, stocks: m.stocks || 0, points: m.pointsValue || 0 };
+    const sources = S.moneyOrder.filter((k) => pick[k] && amounts[k] > 0).map((k) => ({ key: k, name: names[k], amount: amounts[k] }));
+    const wallet = pick.wallet ? m.wallet || 0 : 0;
+    let total = wallet + sources.reduce((t, x) => t + x.amount, 0);
+    const manual = pick.manual > 0;
+    if (manual) total = pick.manual;
+    const budget = pick.limit > 0 ? Math.min(total, pick.limit) : total;
+    return { wallet, sources: manual ? [] : sources, total, budget, manual, amounts, known: !!(me && me.money && me.money.walletAt) };
+  }
+  // The Business Class Ticket's market price, so the planner knows what using one costs.
+  let ticketValue = store.get("ticketValue", { v: 5500000, at: 0 });
+  async function loadTicketValue() {
+    if (nowS() - ticketValue.at < 3600) return;
+    try {
+      const d = await cached(W3B, 10 * MIN);
+      const t = (d.items || []).find((i) => /^business class ticket$/i.test(i.item_name || ""));
+      const v = t && (t.market_price || t.lowest_price);
+      if (v) (ticketValue = { v, at: nowS() }), store.set("ticketValue", ticketValue);
+    } catch {}
+  }
+
   // The ticket you fly with: your choice, else the one from your last trip, else the best your perks allow.
   function myMethod() {
     if (S.method !== "auto") return S.method;
@@ -346,9 +413,24 @@
     if (me && me.cap) return me.cap.wlt ? "wlt" : me.cap.airstrip ? "airstrip" : "standard";
     return "standard";
   }
+  // Your normal ticket for planning: Business only through the tickets you say you have.
+  function planMethod() {
+    if (S.method !== "auto" && S.method !== "business") return S.method;
+    if (me && me.cap) return me.cap.wlt ? "wlt" : me.cap.airstrip ? "airstrip" : "standard";
+    return me && me.lastMethod && me.lastMethod !== "business" ? me.lastMethod : "standard";
+  }
+  // Capacity for a ticket: what the foreign shop showed you beats the count from perks.
+  function capFor(method) {
+    if (S.capOverride > 0) return S.capOverride;
+    const seen = S.capSeen && S.capSeen[method];
+    if (seen && seen.cap) return seen.cap;
+    return (BASE_CAP[method] || 10) + ((me && me.cap && me.cap.parts) || []).reduce((t, p) => t + p.n, 0);
+  }
   function myCapacity() {
     if (S.capOverride > 0) return { total: S.capOverride, manual: true, parts: [], base: S.capOverride };
     const method = myMethod();
+    const seen = S.capSeen && S.capSeen[method];
+    if (seen && seen.cap) return { total: seen.cap, seen: true, seenAt: seen.at, parts: [], base: seen.cap, manual: false, known: true };
     const base = BASE_CAP[method] || 10;
     const parts = (me && me.cap && me.cap.parts) || [];
     return { total: base + parts.reduce((t, p) => t + p.n, 0), base, parts, manual: false, known: !!(me && me.cap) };
@@ -437,6 +519,211 @@
     store.set("data", data);
     return data;
   }
+
+  // ==planner== (pure: no page, storage or network; tested on its own)
+  // Plans a chain of round trips (Torn → country → Torn, the only way flights work) that makes the most
+  // expected profit in a time window, within the money you can use and the slots you can carry.
+  const PLAN = (() => {
+    const SHOP_TIME = 120; // seconds spent buying before flying home
+    const FRESH = 45 * 60;
+    const BEAM = 40;
+    // Standard ticket prices (Torn wiki). Airstrip and the WLT jet fly free; Business uses a ticket.
+    const TICKET = { mex: 6500, cay: 10000, can: 9000, haw: 11000, uni: 18000, arg: 21000, swi: 27000, jap: 32000, chi: 35000, uae: 32000, sou: 40000 };
+
+    // Chance that the item has been restocked by time a, and how many should be left then.
+    // Never waiting abroad means we only count stock that is there when we land.
+    function availability(it, a, now) {
+      const perSec = (it.rate || 0) / 3600;
+      if (it.qty > 0) {
+        const stale = now - it.updated > FRESH;
+        const left = it.qty - perSec * Math.max(0, a - it.updated);
+        if (left >= 1) return { avail: Math.floor(left), p: stale ? 0.6 : 0.95 };
+        const pr = it.pred;
+        if (!perSec || !pr || !pr.avg) return { avail: 0, p: 0 };
+        const restock = it.updated + it.qty / perSec + pr.avg; // runs out, then usually back after this long
+        if (a < restock) return { avail: 0, p: 0 };
+        return { avail: Math.floor((it.amtTypical || it.amt || 200) - perSec * (a - restock)), p: 0.35 };
+      }
+      const pr = it.pred;
+      if (!pr || !pr.at || pr.conf === "none") return { avail: 0, p: 0 };
+      const sure = (pr.pct || 30) / 100;
+      if (pr.overdue) return { avail: it.amtTypical || it.amt || 100, p: 0.2 };
+      if (a < pr.from) return { avail: 0, p: 0 };
+      const frac = pr.to > pr.from ? Math.min(1, (a - pr.from) / (pr.to - pr.from)) : 1;
+      const size = it.amtTypical || it.amt || 0;
+      const sold = perSec * Math.max(0, a - pr.at);
+      const avail = size ? Math.floor(size - sold) : 999; // unknown size: assume enough
+      return { avail: Math.max(0, avail), p: sure * (0.15 + 0.85 * frac) };
+    }
+
+    // Best mix to buy in one country: fills the carrying slots, within the budget.
+    // Flower/plushie-only slots are filled with those first. Tries two orders and keeps the better.
+    function mix(cands, cap, extra, budget) {
+      const run = (order) => {
+        let slots = cap,
+          money = budget;
+        const ex = { ...extra };
+        const buys = [];
+        for (const c of order) {
+          const t = String(c.it.type || "").toLowerCase();
+          let room = slots + (ex[t] || 0);
+          let n = Math.min(c.avail, room, c.it.cost > 0 ? Math.floor(money / c.it.cost) : room);
+          if (n <= 0) continue;
+          const fromExtra = Math.min(n, ex[t] || 0);
+          if (ex[t]) ex[t] -= fromExtra;
+          slots -= n - fromExtra;
+          money -= n * c.it.cost;
+          buys.push({ ...c, units: n });
+        }
+        const best = buys.reduce((t, b) => t + b.units * b.unit, 0);
+        const exp = buys.reduce((t, b) => t + b.units * b.unit * b.p, 0);
+        return { buys, best, exp, cash: budget - money };
+      };
+      const bySlot = [...cands].sort((x, y) => y.unit * y.p - x.unit * x.p);
+      const byMoney = [...cands].sort((x, y) => (y.unit * y.p) / y.it.cost - (x.unit * x.p) / x.it.cost);
+      const a = run(bySlot),
+        b = run(byMoney);
+      return b.exp > a.exp ? b : a;
+    }
+
+    // One round trip to cc leaving at `depart`.
+    function leg(ctx, cc, depart, method, budget, used) {
+      const fl = (ctx.flights[cc] && ctx.flights[cc][method]) * 60;
+      if (!fl) return null;
+      const land = depart + fl;
+      const back = land + SHOP_TIME + fl;
+      const cands = [];
+      for (const it of ctx.byCountry[cc] || []) {
+        if (used.has(it.key)) continue;
+        const unit = Math.floor(it.sell * (1 - ctx.fee / 100)) - it.cost;
+        if (!(unit > 0) || !it.cost) continue;
+        const { avail, p } = availability(it, land, ctx.now);
+        if (avail <= 0 || p <= 0) continue;
+        cands.push({ it, unit, avail, p });
+      }
+      if (!cands.length) return null;
+      const ticket = method === "business" ? ctx.ticketValue : method === "standard" ? TICKET[cc] || 0 : 0;
+      const ticketCash = method === "standard" ? TICKET[cc] || 0 : 0;
+      const m = mix(cands, ctx.cap(method), ctx.extra, Math.max(0, budget - ticketCash));
+      if (!m.buys.length) return null;
+      return {
+        cc,
+        method,
+        depart,
+        land,
+        back,
+        buys: m.buys.map((b) => ({ key: b.it.key, id: b.it.id, name: b.it.name, units: b.units, cost: b.it.cost, unit: b.unit, p: b.p, pred: b.it.pred, qty: b.it.qty })),
+        cash: m.cash + ticketCash,
+        best: m.best - ticket,
+        exp: m.exp - ticket,
+        ticket,
+        sure: m.best > 0 ? m.exp / m.best : 0,
+      };
+    }
+
+    // Departure times worth trying for a country after time t: now, and the times that land at each restock.
+    function departures(ctx, cc, method, t, end) {
+      const fl = ctx.flights[cc][method] * 60;
+      const out = new Set([t]);
+      for (const it of ctx.byCountry[cc] || []) {
+        const pr = it.pred;
+        if (it.qty > 0 || !pr || !pr.at || pr.overdue) continue;
+        const w = Math.max(300, pr.to - pr.at);
+        for (const k of [0, 0.25, 0.5, 1]) {
+          const d = Math.round((pr.at + k * w - fl) / 60) * 60;
+          if (d >= t && d + 2 * fl + SHOP_TIME <= end) out.add(d);
+        }
+      }
+      return [...out].filter((d) => d + 2 * fl + SHOP_TIME <= end).sort((x, y) => x - y).slice(0, 6);
+    }
+
+    function search(ctx, start, end, money, tickets, sellMode) {
+      let beam = [{ t: start, money, tickets, used: new Set(), legs: [], best: 0, exp: 0 }];
+      const done = [];
+      for (let depth = 0; depth < 12 && beam.length; depth++) {
+        const next = [];
+        for (const st of beam) {
+          done.push(st);
+          for (const cc of Object.keys(ctx.flights)) {
+            const methods = [ctx.method];
+            if (st.tickets > 0 && ctx.method !== "business") methods.push("business");
+            for (const method of methods) {
+              for (const d of departures(ctx, cc, method, st.t, end)) {
+                const g = leg(ctx, cc, d, method, st.money, st.used);
+                if (!g || g.exp <= 0) continue;
+                const used = new Set(st.used);
+                g.buys.forEach((b) => used.add(b.key));
+                const sales = g.buys.reduce((t, b) => t + b.units * b.cost, 0) + Math.max(0, g.exp + g.ticket);
+                next.push({
+                  t: g.back,
+                  money: sellMode === "sell" ? st.money - g.cash + sales : st.money - g.cash,
+                  tickets: st.tickets - (method === "business" ? 1 : 0),
+                  used,
+                  legs: [...st.legs, g],
+                  best: st.best + g.best,
+                  exp: st.exp + g.exp,
+                });
+              }
+            }
+          }
+        }
+        // Keep the plans with the most expected profit, plus some that earn fastest, so short good trips survive.
+        const seen = new Set();
+        const uniq = next.filter((s) => {
+          const k = s.legs.map((g) => g.cc + g.depart).join("|");
+          return !seen.has(k) && seen.add(k);
+        });
+        const byTotal = [...uniq].sort((a, b) => b.exp - a.exp).slice(0, BEAM - 10);
+        const byRate = [...uniq].sort((a, b) => b.exp / (b.t - start + 1) - a.exp / (a.t - start + 1)).slice(0, 10);
+        beam = [...new Set([...byTotal, ...byRate])];
+      }
+      done.push(...beam);
+      return done.filter((s) => s.legs.length).sort((a, b) => b.exp - a.exp);
+    }
+
+    // input: { now, start, end, items, flights, method, capFor(method), extra, fee, money, tickets, ticketValue, sellMode, filter(it) }
+    function make(input) {
+      const items = input.items.filter((it) => it.sell > 0 && it.cost > 0 && input.filter(it));
+      const byCountry = {};
+      for (const it of items) (byCountry[it.cc] = byCountry[it.cc] || []).push(it);
+      const ctx = { now: input.now, flights: input.flights, method: input.method, cap: input.capFor, extra: input.extra || {}, fee: input.fee, ticketValue: input.ticketValue || 0, byCountry };
+      const all = search(ctx, input.start, input.end, input.money, input.tickets || 0, input.sellMode);
+      const best = all[0] || null;
+      // Other good plans that start differently, and the most reliable one.
+      const alts = [];
+      for (const s of all.slice(1)) {
+        if (alts.length >= 2) break;
+        if (best && s.legs[0].cc === best.legs[0].cc && Math.abs(s.legs[0].depart - best.legs[0].depart) < 600) continue;
+        if (alts.some((a) => a.legs[0].cc === s.legs[0].cc)) continue;
+        alts.push(s);
+      }
+      const reliable = all.filter((s) => s.legs.every((g) => g.sure >= 0.7))[0] || null;
+      return { best, alts, reliable: reliable && best && reliable !== best ? reliable : null };
+    }
+
+    // Where the cash for each trip comes from: wallet first, then the sources in the order given.
+    function cashSteps(plan, wallet, sources, sellMode) {
+      let w = wallet;
+      const left = sources.map((s) => ({ ...s }));
+      return plan.legs.map((g) => {
+        const take = [];
+        const inHand = w;
+        let need = Math.max(0, g.cash - w);
+        for (const s of left) {
+          if (need <= 0) break;
+          const n = Math.min(need, s.amount);
+          if (n > 0) take.push({ name: s.name, amount: n }), (s.amount -= n), (need -= n), (w += n);
+        }
+        const step = { inHand, take, short: need };
+        w -= Math.min(w, g.cash);
+        if (sellMode === "sell") w += g.buys.reduce((t, b) => t + b.units * (b.cost + b.unit), 0);
+        return step;
+      });
+    }
+
+    return { make, cashSteps, availability, mix, TICKET };
+  })();
+  // ==/planner==
 
   // Item types, once a day with your own key, for items the stock data didn't label.
   let types = store.get("types", null); // { at, map: { id: [type, sub_type] } }
@@ -615,8 +902,8 @@
   function render() {
     $("[data-act=back]").hidden = view.name === "home";
     const it = view.name === "item" && findItem(view.key);
-    $(".title").textContent = { settings: "Settings", alerts: "Phone alerts", setup: "Your setup" }[view.name] || (it ? it.name : "Travel Geek");
-    ({ home: renderHome, item: renderItem, settings: renderSettings, alerts: renderAlerts, setup: renderSetup })[view.name]();
+    $(".title").textContent = { settings: "Settings", alerts: "Phone alerts", setup: "Your setup", money: "Money I can use", accuracy: "How accurate?" }[view.name] || (it ? it.name : "Travel Geek");
+    ({ home: renderHome, item: renderItem, settings: renderSettings, alerts: renderAlerts, setup: renderSetup, money: renderMoney, accuracy: renderAccuracy })[view.name]();
   }
   const findItem = (key) => data && data.items.find((i) => i.key === key);
 
@@ -627,8 +914,10 @@
     $("[data-act=refresh]").classList.add("spinning");
     view.err = null;
     try {
-      await Promise.all([loadData(force), loadMe(force), loadTypes()]);
+      await Promise.all([loadData(force), loadMe(force), loadTypes(), loadTicketValue()]);
+      await loadMoney(force);
       labelTypes();
+      runPlan();
     } catch (e) {
       view.err = e.message;
     }
@@ -679,6 +968,9 @@
   }
 
   function renderHome() {
+    return S.page === "items" ? renderItems() : renderPlan();
+  }
+  function renderItems() {
     const list = data ? rows().slice(0, 80) : [];
     const loc = myLoc();
     const tabs = [
@@ -688,6 +980,7 @@
     ];
     body().innerHTML = `
       ${statusCard()}
+      ${navTabs()}
       ${loc && loc.where === "abroad" && loc.cc ? `<button class="ctx" data-act="country" data-cc="${loc.cc}">You're in ${COUNTRIES[loc.cc].name}: show only items here →</button>` : ""}
       <div class="sorts">${tabs.map(([k, t]) => `<button class="seg ${S.tab === k ? "on" : ""}" data-act="tab" data-k="${k}">${t}</button>`).join("")}</div>
       <div class="filters">
@@ -706,17 +999,18 @@
     $(".f-country").addEventListener("change", (e) => {
       S.country = e.target.value;
       save();
-      renderHome();
+      renderItems();
     });
     $(".f-sort").addEventListener("change", (e) => {
       S.sort = e.target.value;
       save();
-      renderHome();
+      renderItems();
     });
     $(".f-fast").addEventListener("change", (e) => {
       S.fastOnly = e.target.checked;
       save();
-      renderHome();
+      planOut = null;
+      renderItems();
       syncSoon();
     });
   }
@@ -724,13 +1018,317 @@
   const SPEED = { fast: `<span class="pill good">sells fast</span>`, slow: `<span class="pill bad">sells slowly</span>`, medium: `<span class="pill even">sells OK</span>`, unknown: "" };
   function row({ it, p, pl, watched }) {
     const c = COUNTRIES[it.cc];
-    const stock = it.qty > 0 ? `${num(it.qty)} in stock · ${ago(it.updated)} ago` : `<span class="a">Empty</span>${it.pred && it.pred.at && !it.pred.overdue ? ` · back ~${clock(it.pred.at)} (${CONF[it.pred.conf].toLowerCase()})` : it.pred && it.pred.overdue ? " · overdue" : ""}`;
+    const stock = it.qty > 0 ? `${num(it.qty)} in stock · ${ago(it.updated)} ago` : `<span class="a">Empty</span>${it.pred && it.pred.at && !it.pred.overdue ? ` · back ~${clock(it.pred.at)} (${it.pred.pct != null ? it.pred.pct + "%" : CONF[it.pred.conf].toLowerCase()})` : it.pred && it.pred.overdue ? " · overdue" : ""}`;
     const tag = pl.kind === "go" ? `<span class="g">Go now</span>` : pl.kind === "wait" ? `<span class="acc">Leave ${clock(pl.leaveAt)}</span>` : pl.kind === "late" ? `<span class="r">Too late</span>` : "";
     return `<button class="row" data-act="item" data-key="${it.key}">
       <img src="${img(it.id)}" alt="" loading="lazy">
       <span class="nm">${watched ? "⭐ " : ""}${esc(it.name)}<small>${c.flag} ${esc(c.name)} · ${stock}</small><small>${SPEED[it.speed] || ""} ${tag}</small></span>
       <span class="rt"><b class="${p.trip > 0 ? "g" : "r"}">${short(p.trip)}</b><small>${short(p.perHour)}/hr</small></span>
     </button>`;
+  }
+
+  // ---------------------------------------------------------------- trip planner screen
+  const todayAt = (mins) => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return Math.floor(d.getTime() / 1000) + mins * 60;
+  };
+  const timeVal = (mins) => (mins == null ? "" : hm(mins));
+  // When planning can start (you may be abroad or flying) and when it has to end.
+  function planWindow() {
+    const now = nowS();
+    const loc = myLoc() || { where: "torn" };
+    let t0 = now,
+      note = "";
+    const name = (cc) => (cc && COUNTRIES[cc] ? COUNTRIES[cc].name : "abroad");
+    if (loc.where === "flying" && loc.arrive) {
+      t0 = loc.arrive + 120 + flightSec(loc.cc, (me && me.lastMethod) || planMethod());
+      note = `Starts when you're back from ${name(loc.cc)} (~${clock(t0)}).`;
+    } else if (loc.where === "abroad") {
+      t0 = now + 120 + flightSec(loc.cc, planMethod());
+      note = `Starts when you're back from ${name(loc.cc)} (~${clock(t0)}).`;
+    } else if (loc.where === "returning" && loc.arrive) {
+      t0 = loc.arrive;
+      note = `Starts when you land in Torn (${clock(t0)}).`;
+    } else if (["hospital", "jail", "federal"].includes(loc.where) && loc.until > now) {
+      t0 = loc.until;
+      note = `Starts when you're out of ${loc.where} (${clock(t0)}).`;
+    }
+    let start = t0;
+    if (S.planStart != null) {
+      let at = todayAt(S.planStart);
+      if (at < now - 300) at += 86400;
+      start = Math.max(t0, at);
+    }
+    let end = start + (S.planHours || 4) * 3600;
+    if (!S.planHours && S.planUntil != null) {
+      end = todayAt(S.planUntil);
+      while (end <= start) end += 86400;
+    }
+    return { start, end, note };
+  }
+
+  let planOut = null,
+    planPrev = "",
+    planChanged = "";
+  const planFilter = (it) => !S.hidden.includes(it.key) && (S.watch.includes(it.key) || !S.fastOnly || it.speed === "fast");
+  function runPlan() {
+    if (!data || !data.items) return (planOut = null);
+    const w = planWindow();
+    const money = usableMoney();
+    const unknownMoney = !money.manual && !money.known;
+    const budget = unknownMoney ? 1e12 : money.budget;
+    const flights = Object.fromEntries(Object.entries(COUNTRIES).map(([cc, c]) => [cc, c.min]));
+    const input = {
+      now: nowS(),
+      start: w.start,
+      end: w.end,
+      items: data.items,
+      flights,
+      method: planMethod(),
+      capFor,
+      extra: { flower: extraFor("flower"), plushie: extraFor("plushie") },
+      fee: +S.fee || 0,
+      money: budget,
+      tickets: +S.tickets || 0,
+      ticketValue: ticketValue.v,
+      sellMode: S.sellMode,
+      filter: planFilter,
+    };
+    const out = PLAN.make(input);
+    out.window = w;
+    out.money = money;
+    out.unknownMoney = unknownMoney;
+    out.at = nowS();
+    if (out.best) out.steps = PLAN.cashSteps(out.best, money.manual ? budget : money.wallet, money.sources, S.sellMode);
+    if (out.best && !unknownMoney) {
+      const rich = PLAN.make({ ...input, money: 1e12 }).best;
+      if (rich && rich.exp > out.best.exp * 1.05 + 250000) {
+        const need = S.sellMode === "sell" ? Math.max(...rich.legs.map((g) => g.cash)) : rich.legs.reduce((t, g) => t + g.cash, 0);
+        out.richer = { more: rich.exp - out.best.exp, need };
+      }
+    }
+    // Tell the player when the first step changes, and why.
+    const g = out.best && out.best.legs[0];
+    const sig = g ? `${g.cc}@${Math.round(g.depart / 600)}` : "";
+    if (planPrev && sig !== planPrev && g) {
+      const [pcc] = planPrev.split("@");
+      planChanged = pcc !== g.cc ? `Plan changed: first trip is now ${COUNTRIES[g.cc].name} instead of ${COUNTRIES[pcc].name} (new stock or restock data).` : `Plan changed: leave for ${COUNTRIES[g.cc].name} at ${clock(g.depart)} (restock timing moved).`;
+    }
+    planPrev = sig;
+    return (planOut = out);
+  }
+
+  const cdText = (ts) => {
+    const d = ts - nowS();
+    if (d <= -300) return "";
+    if (d <= 0) return "now!";
+    const h = Math.floor(d / 3600),
+      m = Math.floor((d % 3600) / 60),
+      s = d % 60;
+    return "in " + (h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`);
+  };
+  const buyText = (g) => g.buys.map((b) => `${b.units} × ${b.name}`).join(" + ");
+  function legHtml(g, i, step) {
+    const c = COUNTRIES[g.cc];
+    const lines = g.buys
+      .map((b) => {
+        const when = b.qty > 0 ? `in stock (${num(b.qty)})` : b.pred && b.pred.at ? `restock ~${clock(b.pred.at)}` : "restock expected";
+        return `<div class="buy"><b>${b.units} × ${esc(b.name)}</b> <span class="muted">· ${when} · ${Math.round(b.p * 100)}% sure · +${short(b.units * b.unit)}</span></div>`;
+      })
+      .join("");
+    const moneyLine = step
+      ? step.short > 0
+        ? `<div class="r small">Short by ${short(step.short)} for this trip.</div>`
+        : step.take.length
+          ? `<div class="a small">${step.inHand > 0 ? `You'll have ${short(step.inHand)} in hand → get` : "Get"} ${short(step.take.reduce((t, x) => t + x.amount, 0))} first: ${step.take.map((x) => `${x.name} ${short(x.amount)}`).join(", ")}</div>`
+          : ""
+      : "";
+    return `<div class="leg">
+      <div class="leg-h"><span class="n">${i + 1}</span> ${c.flag} <b>${esc(c.name)}</b> · leave <b>${clock(g.depart)}</b> <span class="cd" data-cd="${g.depart}">${cdText(g.depart)}</span></div>
+      <div class="muted small">Land ${clock(g.land)} · back in Torn ${clock(g.back)} · ${esc(METHOD_LABEL[g.method])}${g.method === "business" ? ` (uses 1 ticket, worth ${short(g.ticket)})` : ""}</div>
+      ${lines}
+      <div class="small">Take <b>${short(g.cash)}</b> · profit <b class="g">+${short(g.best)}</b> <span class="muted">(expected +${short(g.exp)})</span></div>
+      ${moneyLine}
+    </div>`;
+  }
+  function planSummary(p, label) {
+    const back = p.legs[p.legs.length - 1].back;
+    return `<b>${label}</b> · expected <b class="g">+${short(p.exp)}</b> <span class="muted">(best case +${short(p.best)})</span> · ${p.legs.length} trip${p.legs.length > 1 ? "s" : ""} · back ${clock(back)}`;
+  }
+
+  function renderPlan() {
+    if (!planOut || nowS() - (planOut.at || 0) > 60) runPlan();
+    const o = planOut;
+    const m = usableMoney();
+    const hoursOpts = [1, 2, 4, 6, 8].map((h) => `<option value="${h}" ${S.planHours === h ? "selected" : ""}>${h} hour${h > 1 ? "s" : ""}</option>`).join("");
+    const moneyTxt = m.manual
+      ? `<b>${short(m.total)}</b> ✏️<small class="muted">your own number</small>`
+      : !m.known
+        ? `<span class="a">unknown: add your API key</span> ✏️`
+        : `<b>${short(m.budget)}</b> ✏️<small class="muted">${[m.wallet ? `wallet ${short(m.wallet)}` : "", ...m.sources.map((x) => `${x.name.toLowerCase()} ${short(x.amount)}`)].filter(Boolean).join(" · ")}</small>`;
+    let res = "";
+    if (!data) res = `<div class="spin"></div>`;
+    else if (!o || !o.best)
+      res = `<p class="muted hint">No profitable trip fits ${o && o.window ? `between ${clock(o.window.start)} and ${clock(o.window.end)}` : "right now"}. Try a longer time, more money, turning off &ldquo;sell fast&rdquo; in Items, or a Business ticket.</p>`;
+    else {
+      const b = o.best;
+      const cashAll = S.sellMode === "sell" ? Math.max(...b.legs.map((g) => g.cash)) : b.legs.reduce((t, g) => t + g.cash, 0);
+      const following = S.follow && S.follow.sig === b.legs.map((g) => g.cc + g.depart).join("|");
+      res = `
+        ${planChanged ? `<div class="card changed small">🔄 ${esc(planChanged)}</div>` : ""}
+        <div class="card plan-sum">
+          <div>${planSummary(b, "Best plan")}</div>
+          <div class="small">Cash needed: <b>${short(cashAll)}</b> ${S.sellMode === "sell" ? "(biggest single trip, selling in between)" : "(all trips, not selling in between)"}${
+            o.unknownMoney ? "" : ` · you can use ${short(m.budget)}`
+          }</div>
+          ${o.window.note ? `<div class="muted small">${esc(o.window.note)}</div>` : ""}
+        </div>
+        ${b.legs.map((g, i) => legHtml(g, i, o.steps && o.steps[i])).join("")}
+        <div class="btns">
+          ${canRemind() ? `<button class="btn ghost" data-act="planRemind">⏰ Remind me for each trip</button>` : ""}
+          ${
+            S.alertsOn && helperUrl()
+              ? following
+                ? `<button class="btn ghost" data-act="planUnfollow">🔔 Following ✓ · stop</button>`
+                : `<button class="btn" data-act="planFollow">🔔 Follow this plan</button>`
+              : `<button class="btn ghost" data-act="alerts">🔔 Turn on phone alerts to follow plans</button>`
+          }
+        </div>
+        ${o.richer ? `<div class="card small">💰 With ${short(o.richer.need)} you'd make about <b>+${short(o.richer.more)}</b> more.</div>` : ""}
+        ${o.alts.length || o.reliable ? `<h3>Other plans</h3>` : ""}
+        ${o.reliable ? `<details class="alt"><summary>${planSummary(o.reliable, "Most reliable")}</summary>${o.reliable.legs.map((g, i) => legHtml(g, i)).join("")}</details>` : ""}
+        ${o.alts.map((a) => `<details class="alt"><summary>${planSummary(a, `Starts with ${COUNTRIES[a.legs[0].cc].name}`)}</summary>${a.legs.map((g, i) => legHtml(g, i)).join("")}</details>`).join("")}`;
+    }
+    body().innerHTML = `
+      ${statusCard()}
+      ${navTabs()}
+      <div class="card controls">
+        <div class="ctl"><span>Start</span>
+          <select class="p-start"><option value="now" ${S.planStart == null ? "selected" : ""}>Now</option><option value="at" ${S.planStart != null ? "selected" : ""}>At a time…</option></select>
+          <input class="p-start-at" type="time" value="${timeVal(S.planStart)}" ${S.planStart == null ? "hidden" : ""}>
+        </div>
+        <div class="ctl"><span>Play for</span>
+          <select class="p-hours">${hoursOpts}<option value="0" ${!S.planHours ? "selected" : ""}>Until a time…</option></select>
+          <input class="p-until" type="time" value="${timeVal(S.planUntil)}" ${S.planHours ? "hidden" : ""}>
+        </div>
+        <div class="ctl"><span>Money I can use</span><button class="link2 money" data-act="money">${moneyTxt}</button></div>
+        <div class="ctl"><span>Between trips</span>
+          <div class="sorts slim">${[
+            ["hold", "Don't sell"],
+            ["sell", "Sell"],
+          ]
+            .map(([k, t]) => `<button class="seg ${S.sellMode === k ? "on" : ""}" data-act="sellMode" data-k="${k}">${t}</button>`)
+            .join("")}</div>
+        </div>
+        <div class="ctl"><span>Business tickets I have</span><input class="num p-tickets" type="number" min="0" max="50" inputmode="numeric" value="${+S.tickets || 0}"></div>
+      </div>
+      ${res}
+      <p class="foot muted">Plans are round trips (Torn → country → Torn) that land at a restock instead of waiting abroad. &ldquo;Expected&rdquo; counts how often predictions have really been right. <button class="link small" data-act="accuracy">How accurate are predictions?</button><br>Travel Geek v${VERSION}</p>`;
+    const re = () => {
+      save();
+      planPrev = "";
+      planChanged = "";
+      runPlan();
+      renderPlan();
+    };
+    $(".p-start").addEventListener("change", (e) => {
+      if (e.target.value === "now") (S.planStart = null), re();
+      else {
+        const d = new Date(Date.now() + 30 * MIN);
+        S.planStart = d.getHours() * 60 + Math.floor(d.getMinutes() / 5) * 5;
+        re();
+      }
+    });
+    $(".p-start-at").addEventListener("change", (e) => {
+      const v = parseHm(e.target.value);
+      if (v != null) (S.planStart = v), re();
+    });
+    $(".p-hours").addEventListener("change", (e) => {
+      S.planHours = +e.target.value;
+      if (!S.planHours && S.planUntil == null) {
+        const d = new Date(Date.now() + 4 * 3600 * 1000);
+        S.planUntil = d.getHours() * 60;
+      }
+      re();
+    });
+    $(".p-until").addEventListener("change", (e) => {
+      const v = parseHm(e.target.value);
+      if (v != null) (S.planUntil = v), re();
+    });
+    $(".p-tickets").addEventListener("change", (e) => {
+      S.tickets = Math.max(0, parseInt(e.target.value) || 0);
+      re();
+    });
+  }
+  function navTabs() {
+    return `<div class="sorts nav">${[
+      ["plan", "🧭 Trip planner"],
+      ["items", "📋 All items"],
+    ]
+      .map(([k, t]) => `<button class="seg ${S.page === k ? "on" : ""}" data-act="page" data-k="${k}">${t}</button>`)
+      .join("")}</div>`;
+  }
+  // Countdowns tick every second without redrawing the screen.
+  function tickCountdowns() {
+    if (!isOpen()) return;
+    $$("[data-cd]").forEach((el) => (el.textContent = cdText(+el.dataset.cd)));
+  }
+
+  // ---------------------------------------------------------------- money screen
+  function renderMoney() {
+    const m = usableMoney();
+    const mm = (me && me.money) || {};
+    const row = (k, label, amount, note) =>
+      `<label class="tog"><input type="checkbox" data-mk="${k}" ${S.money[k] ? "checked" : ""}><span><b>${label}</b> ${amount != null ? short(amount) : "—"}${note ? `<small class="muted">${note}</small>` : ""}</span></label>`;
+    body().innerHTML = `
+      <div class="form">
+        <div class="card"><div class="big">${m.manual ? short(m.total) : m.known ? short(m.budget) : "—"}</div><div class="small muted">money the planner may use${m.manual ? " (your own number)" : ""}</div></div>
+        <h3>Count money from</h3>
+        ${row("wallet", "Wallet", mm.wallet, "Cash in hand right now.")}
+        ${row("vault", "Vault", mm.vault || mm.vaultNw, "Withdraw any time.")}
+        ${row("faction", "Faction", mm.factionOk ? mm.faction : null, mm.factionErr ? "Couldn't read: " + esc(mm.factionErr) : "Untick if only leaders can hand it out in your faction.")}
+        ${row("stocks", "Stocks", mm.nwOk ? mm.stocks : null, mm.nwErr ? "Couldn't read: " + esc(mm.nwErr) : "Sells instantly (small fee). From your networth, which Torn may update with a delay.")}
+        ${row("points", "Points", mm.nwOk ? mm.pointsValue : null, "Only if you'll sell points first.")}
+        <p class="muted small">Not counted: city bank (locked until the term ends), Cayman bank (only usable in Cayman), items and property.</p>
+        <h3>Get money from (in order)</h3>
+        <div class="chips">${S.moneyOrder.map((k, i) => `<button class="chip" data-act="moneyUp" data-k="${k}">${i + 1}. ${{ vault: "Vault", faction: "Faction", stocks: "Stocks", points: "Points" }[k]}${i ? " ↑" : ""}</button>`).join("")}</div>
+        <p class="muted small">Tap one to move it up. Plans tell you where to take cash from before each trip, in this order. It never moves money for you.</p>
+        <h3>Limits</h3>
+        <label class="tog">Don't spend more than<input class="num wide" data-mm="limit" inputmode="decimal" placeholder="no limit" value="${S.money.limit ? short(S.money.limit).slice(1) : ""}"></label>
+        <label class="tog">Use my own number instead<input class="num wide" data-mm="manual" inputmode="decimal" placeholder="off" value="${S.money.manual ? short(S.money.manual).slice(1) : ""}"></label>
+        <button class="btn ghost" data-act="reloadMoney">Re-check my money</button>
+      </div>`;
+    $$("[data-mk]").forEach((el) => el.addEventListener("change", () => ((S.money[el.dataset.mk] = el.checked), save(), (planOut = null), renderMoney())));
+    $$("[data-mm]").forEach((el) =>
+      el.addEventListener("change", () => {
+        S.money[el.dataset.mm] = parseMoney(el.value);
+        save();
+        planOut = null;
+        renderMoney();
+      })
+    );
+  }
+
+  // ---------------------------------------------------------------- accuracy screen
+  function renderAccuracy() {
+    const items = ((data && data.items) || []).filter((it) => it.pred && it.pred.n).sort((a, b) => (b.pred.scored || 0) - (a.pred.scored || 0) || b.pred.n - a.pred.n);
+    const scored = items.filter((it) => it.pred.scored);
+    const hits = scored.reduce((t, it) => t + (it.pred.hits || 0), 0),
+      total = scored.reduce((t, it) => t + it.pred.scored, 0);
+    body().innerHTML = `
+      <div class="card"><div class="big">${total ? Math.round((hits / total) * 100) + "%" : "—"}</div><div class="small muted">${total ? `of ${total} checked predictions landed within 10 minutes` : "No predictions checked yet. Each restock the helper sees is compared with what it predicted."}</div></div>
+      <p class="muted small">Only items that are empty right now have a prediction, so this list changes as stock comes and goes.</p>
+      <div class="list">${
+        items.length
+          ? items
+              .map((it) => {
+                const p = it.pred;
+                return `<button class="row" data-act="item" data-key="${it.key}"><span class="nm">${COUNTRIES[it.cc].flag} ${esc(it.name)}<small>${p.scored ? `${p.hits} of ${p.scored} within 10 min · usually off by ${dur(p.err || 0)}` : `${p.n} restock${p.n > 1 ? "s" : ""} seen, not checked yet`} · uses ${esc(p.methodLabel || "recent restocks")}</small></span><span class="rt"><b class="${p.pct >= 70 ? "g" : p.pct >= 45 ? "a" : "r"}">${p.pct}%</b><small>${CONF[p.conf]}</small></span></button>`;
+              })
+              .join("")
+          : `<p class="muted hint">Nothing yet. Give the helper a day or so.</p>`
+      }</div>`;
   }
 
   // ---------------------------------------------------------------- item
@@ -766,7 +1364,7 @@
         <div class="muted">Selling speed: ${it.rate ? `~${num(it.rate)}/hour` : "unknown"}${it.amt ? ` · last restock brought ~${num(it.amt)}` : ""}${it.lastRestock ? ` · last restock ${clock(it.lastRestock)}` : ""}</div>
         ${
           pr && pr.at
-            ? `<div>Next restock: <b>~${clock(pr.at)}</b> (between ${clock(pr.from)} and ${clock(pr.to)}) · ${CONF[pr.conf]} confidence${pr.overdue ? " · <span class='a'>overdue</span>" : ""}</div><div class="muted">Usually empty for ${dur(pr.avg || 0)} · based on ${pr.n} restock${pr.n === 1 ? "" : "s"} the helper saw</div>`
+            ? `<div>Next restock: <b>~${clock(pr.at)}</b> (between ${clock(pr.from)} and ${clock(pr.to)}) · <b>${pr.pct != null ? pr.pct + "% sure" : CONF[pr.conf] + " confidence"}</b>${pr.overdue ? " · <span class='a'>overdue</span>" : ""}</div><div class="muted">Usually empty for ${dur(pr.avg || 0)} · ${pr.n} restock${pr.n === 1 ? "" : "s"} seen${pr.scored ? ` · last ${pr.scored} predictions: ${pr.hits} within 10 min, usually off by ${dur(pr.err || 0)}` : ""}${pr.methodLabel ? ` · based on ${esc(pr.methodLabel)}` : ""}</div>`
             : it.qty === 0
               ? `<div class="muted">${data.fromHelper ? "Not enough restock history yet. It improves the longer the helper runs." : "Restock predictions need the helper."}</div>`
               : ""
@@ -796,7 +1394,9 @@
           <div class="big">${cap.total} items</div>
           ${
             auto
-              ? `<div class="small muted">${auto.known ? "Worked out from your perks:" : apiKey() ? "Couldn't read your perks yet (needs a Limited or Full key)." : "Add your API key to work this out."}</div>
+              ? auto.seen
+                ? `<div class="small muted">Read from the foreign shop (&ldquo;purchased X / ${auto.total}&rdquo;) on ${new Date(auto.seenAt * 1000).toLocaleDateString()}. This is exact.</div>`
+                : `<div class="small muted">${auto.known ? "Worked out from your perks:" : apiKey() ? "Couldn't read your perks yet (needs a Limited or Full key)." : "Add your API key to work this out."}</div>
                  <div class="small">Base ${auto.base} (${esc(METHOD_LABEL[myMethod()])})</div>
                  ${auto.parts.map((p) => `<div class="small">${esc(/^\+/.test(p.text) ? p.text : `+${p.n} · ${p.text}`)} <span class="muted">(${esc(p.group)})</span></div>`).join("")}`
               : `<div class="small muted">Set by you.</div>`
@@ -1013,7 +1613,71 @@
       case "settings":
       case "alerts":
       case "setup":
+      case "money":
+      case "accuracy":
         return go(act);
+      case "page":
+        S.page = el.dataset.k;
+        save();
+        return renderHome();
+      case "sellMode":
+        S.sellMode = el.dataset.k;
+        save();
+        planPrev = "";
+        planChanged = "";
+        runPlan();
+        return renderPlan();
+      case "moneyUp": {
+        const i = S.moneyOrder.indexOf(el.dataset.k);
+        if (i > 0) [S.moneyOrder[i - 1], S.moneyOrder[i]] = [S.moneyOrder[i], S.moneyOrder[i - 1]];
+        save();
+        return renderMoney();
+      }
+      case "reloadMoney":
+        if (me) me.money = Object.assign({}, me.money, { otherAt: 0 });
+        await loadMe(true);
+        await loadMoney(true);
+        planOut = null;
+        toast(me && me.err ? "Torn API: " + me.err : "Updated", me && me.err ? "bad" : "ok");
+        return renderMoney();
+      case "planRemind": {
+        const b = planOut && planOut.best;
+        if (!b) return;
+        let n = 0;
+        for (const [i, g] of b.legs.entries()) {
+          if (g.depart - 120 <= nowS()) continue;
+          try {
+            await window.flutter_inappwebview.callHandler("scheduleNotification", {
+              title: `🛫 Leave for ${COUNTRIES[g.cc].name} at ${clock(g.depart)} (trip ${i + 1} of ${b.legs.length})`,
+              subtitle: `${buyText(g)}. Take ${short(g.cash)}. Travel Geek`,
+              id: 2000 + i,
+              timestamp: (g.depart - 120) * 1000,
+              overwriteID: true,
+              launchNativeToast: false,
+              urlCallback: TRAVEL_URL,
+            });
+            n++;
+          } catch {}
+        }
+        return toast(n ? `${n} reminder${n > 1 ? "s" : ""} set, 2 minutes before each departure` : "Nothing left to remind", n ? "ok" : "", 3000);
+      }
+      case "planFollow":
+      case "planUnfollow": {
+        const b = planOut && planOut.best;
+        const follow = act === "planFollow" && b;
+        try {
+          await httpSend("POST", helperUrl() + "/api/plan", {
+            key: apiKey(),
+            plan: follow ? { made: nowS(), legs: b.legs.map((g) => ({ cc: g.cc, depart: g.depart, land: g.land, back: g.back, cash: g.cash, buy: buyText(g) })) } : null,
+          });
+          S.follow = follow ? { sig: b.legs.map((g) => g.cc + g.depart).join("|"), made: nowS(), legs: b.legs.map((g) => ({ cc: g.cc, depart: g.depart, back: g.back, buys: g.buys.map((x) => ({ id: x.id, units: x.units })) })) } : null;
+          save();
+          toast(follow ? "Following: you'll get an alert before each departure" : "Stopped following", "ok", 3000);
+        } catch (er) {
+          toast("Couldn't reach the helper: " + er.message, "bad", 4000);
+        }
+        return renderPlan();
+      }
       case "item":
         return go("item", el.dataset.key);
       case "refresh":
@@ -1118,6 +1782,123 @@
     if (e.key === "Escape" && isOpen()) close();
   });
 
+  // ---------------------------------------------------------------- foreign shop (while abroad)
+  // Reads the shop the same way Torn PDA does (rows inside "stockTableWrapper"), reports the exact stock to the
+  // helper so restock times are learned precisely, learns your real capacity from "purchased X / Y", and adds a
+  // Fill button next to Buy that types an amount into the buy box. You still press Buy yourself.
+  let shopReportAt = 0;
+  const shopCountry = () => {
+    const h4 = document.querySelector("[class*='titleContainer'] h4") || document.querySelector(".content-title > h4");
+    const t = h4 ? h4.textContent.trim() : "";
+    const code = t.slice(0, 3).toLowerCase();
+    if (COUNTRIES[code]) return code;
+    const loc = myLoc();
+    return (loc && loc.where === "abroad" && loc.cc) || null;
+  };
+  function shopRows() {
+    const rows = [];
+    document.querySelectorAll('div[class*="stockTableWrapper"] div[class*="row___"]').forEach((el) => {
+      const img = el.querySelector("img.torn-item") || el.querySelector("img[src*='/images/items/']");
+      const id = img ? +(((img.getAttribute("src") || "").match(/\/items\/(\d+)\//) || [])[1] || 0) : 0;
+      if (!id) return;
+      let cost = 0,
+        qty = -1;
+      el.querySelectorAll("span").forEach((sp) => {
+        const t = sp.textContent.trim();
+        if (t.includes("$") && sp.getAttribute("aria-hidden") !== "true") cost = parseMoney(t) || +t.replace(/[^0-9]/g, "") || cost;
+        if (/stock/i.test(t) && sp.parentElement) qty = +sp.parentElement.textContent.replace(/[^0-9]/g, "") || 0;
+      });
+      rows.push({ id, cost, qty: qty < 0 ? 0 : qty, el });
+    });
+    return rows;
+  }
+  // "You have purchased 3 / 22 items" (wide layout) or a "3 / 22" counter (narrow layout).
+  function shopCapacity() {
+    for (const el of document.querySelectorAll('[class*="messageContent___"], [class*="items-"]')) {
+      const m = el.textContent.match(/(\d+)\s*\/\s*(\d+)/);
+      if (m && +m[2] > 0 && +m[2] < 500) return { used: +m[1], cap: +m[2] };
+    }
+    return null;
+  }
+  const walletOnPage = () => {
+    const el = document.querySelector("#user-money") || document.querySelector("[data-currency-money]");
+    if (!el) return null;
+    const v = +String(el.getAttribute("data-money") || el.textContent).replace(/[^0-9]/g, "");
+    return Number.isFinite(v) ? v : null;
+  };
+  // Units the followed plan wants of this item here, if any.
+  function plannedUnits(cc, id) {
+    const f = S.follow;
+    if (!f || !f.legs) return null;
+    const g = f.legs.find((x) => x.cc === cc && x.depart <= nowS() + 600 && x.back + 1800 >= nowS());
+    const b = g && g.buys.find((x) => x.id === id);
+    return b ? b.units : null;
+  }
+  function fillAmount(row, cc) {
+    const capInfo = shopCapacity();
+    const capLeft = capInfo ? capInfo.cap - capInfo.used : capFor(myMethod());
+    const money = walletOnPage();
+    const afford = money != null && row.cost > 0 ? Math.floor(money / row.cost) : Infinity;
+    const planned = plannedUnits(cc, row.id);
+    const n = Math.min(planned != null ? planned : capLeft, capLeft, row.qty > 0 ? row.qty : Infinity, afford);
+    return { n: Math.max(0, n), planned };
+  }
+  // Types a value into Torn's box the way a person would, so the page notices. Nothing is submitted.
+  function typeInto(input, value) {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    setter.call(input, String(value));
+    if (input._valueTracker) input._valueTracker.setValue("");
+    for (const type of ["input", "change", "keyup"]) input.dispatchEvent(new Event(type, { bubbles: true }));
+  }
+  function shopTick() {
+    const rows = shopRows();
+    if (!rows.length) return;
+    const cc = shopCountry();
+    // 1. Your real capacity for this ticket.
+    const capInfo = shopCapacity();
+    const method = (me && me.travel && METHOD_FROM_API[String(me.travel.method || "").toLowerCase()]) || myMethod();
+    if (capInfo && (!S.capSeen[method] || S.capSeen[method].cap !== capInfo.cap)) {
+      S.capSeen[method] = { cap: capInfo.cap, at: nowS() };
+      save();
+      syncSoon();
+    }
+    // 2. Exact stock to the helper, at most about once a minute.
+    if (cc && helperUrl() && apiKey() && nowS() - shopReportAt > 70) {
+      shopReportAt = nowS();
+      httpSend("POST", helperUrl() + "/api/report", { key: apiKey(), cc, items: rows.filter((r) => r.cost > 0).map((r) => ({ id: r.id, qty: r.qty, cost: r.cost })) }).catch(() => {});
+    }
+    // 3. Fill buttons next to each Buy button, and a green outline on items in your plan.
+    for (const r of rows) {
+      const li = r.el.closest("li") || r.el;
+      if (cc && plannedUnits(cc, r.id) != null) r.el.style.outline = "2px solid #7fdc6f";
+      li.querySelectorAll('button.torn-btn[type="submit"]').forEach((buy) => {
+        let fb = buy.parentElement && buy.parentElement.querySelector(".tg-fill");
+        if (!fb) {
+          fb = document.createElement("button");
+          fb.type = "button";
+          fb.className = "torn-btn tg-fill";
+          fb.style.cssText = "margin-left:5px;padding:0 8px;height:30px;font-size:11px;background:#2f6f3a;color:#fff;border-radius:4px;";
+          fb.title = "Travel Geek: type the amount into the box. You still press Buy.";
+          fb.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const row = shopRows().find((x) => x.id === r.id) || r;
+            const { n } = fillAmount(row, shopCountry());
+            const form = buy.form || li.querySelector("form");
+            const input = (form && form.querySelector("input.input-money")) || li.querySelector('input.input-money, input[type="number"], input[type="text"]');
+            if (!input) return toast("Open this item's buy box first, then tap Fill", "bad", 3000);
+            if (!n) return toast("Nothing to fill: no room, no stock or not enough cash", "bad", 3000);
+            typeInto(input, n);
+            toast(`Typed ${n}. Check it, then press Buy yourself.`, "ok", 2500);
+          });
+          buy.insertAdjacentElement("afterend", fb);
+        }
+        const { n, planned } = fillAmount(r, cc);
+        fb.textContent = planned != null ? `Fill ${n} (plan)` : `Fill ${n}`;
+      });
+    }
+  }
+
   // ---------------------------------------------------------------- draggable button
   let fabDragged = false;
   function placeFab() {
@@ -1188,6 +1969,12 @@
       if (document.hidden) return;
       refresh(false);
     }, 2 * MIN);
+    setInterval(tickCountdowns, 1000);
+    setInterval(() => {
+      try {
+        if (document.querySelector('div[class*="stockTableWrapper"]')) shopTick();
+      } catch {}
+    }, 1500);
     // Keep "leave in 12m" and similar text current while the panel is open.
     setInterval(() => isOpen() && ["home", "item"].includes(view.name) && !root.activeElement && render(), 30 * 1000);
   }
@@ -1299,6 +2086,25 @@ input[type=checkbox] { width: 20px; height: 20px; flex: none; padding: 0; }
 .toast.busy { color: var(--acc); border-color: var(--acc); }
 .toast.ok { color: var(--g); border-color: var(--g); }
 .toast.bad { color: var(--r); border-color: var(--r); }
+.sorts.nav { margin: 10px 0 0; }
+.controls { margin-top: 10px; gap: 8px; }
+.ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ctl > span:first-child { flex: 0 0 120px; color: var(--muted); font-size: 12px; }
+.ctl select, .ctl input[type=time] { flex: 1; min-width: 110px; padding: 6px 8px; font-size: 14px; }
+.ctl input.num { width: 80px; padding: 6px 8px; }
+.ctl .sorts { flex: 1; margin: 0; }
+.ctl .money { flex: 1; text-align: left; font-size: 15px; }
+.ctl .money small, .tog span small { display: block; font-size: 11px; font-weight: 400; margin-top: 1px; }
+.plan-sum { margin-top: 10px; border-color: rgba(127,220,111,.5); }
+.changed { margin-top: 10px; border-color: var(--amber); color: var(--amber); }
+.leg { background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 9px 10px; margin-top: 8px; display: grid; gap: 4px; }
+.leg-h { font-size: 15px; }
+.leg-h .n { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: var(--bg3); font-size: 12px; font-weight: 700; margin-right: 2px; }
+.cd { color: var(--acc); font-weight: 700; font-variant-numeric: tabular-nums; }
+.buy { font-size: 13px; }
+details.alt { background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; margin-top: 6px; font-size: 13px; }
+details.alt summary { cursor: pointer; }
+.btns .btn { margin: 0 6px 6px 0; }
 `;
   }
 })();

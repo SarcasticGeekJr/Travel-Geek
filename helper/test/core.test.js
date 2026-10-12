@@ -235,3 +235,84 @@ test("item types from the Torn API win over the price source", () => {
   assert.equal(items[0].type, "Weapon");
   assert.equal(items[0].speed, "slow");
 });
+
+// ------------------------------------------------------------ learning
+import { bestMethod, METHODS_PREDICT } from "../src/core.js";
+
+test("each restock scores the prediction made when the item ran out", () => {
+  let s;
+  const look = (at, qty) => (s = observe(s, { at, qty, cost: 1, name: "X", precise: true }));
+  let t = 0;
+  // 5 cycles of 2h empty each, exact looks.
+  for (let k = 0; k < 6; k++) {
+    look(t, 100);
+    look(t + H, 0);
+    look(t + 3 * H, 100);
+    t += 4 * H;
+  }
+  assert.equal(s.cycles.length, 6);
+  assert.ok(s.errs.length >= 4, "predictions were scored");
+  assert.ok(s.errs.every((e) => Math.abs(e) < 60), "and they were right");
+  look(t, 100);
+  look(t + H, 0);
+  const p = predictRestock(s, t + H);
+  assert.equal(p.scored, s.errs.length);
+  assert.ok(p.pct >= 80, "confidence comes from the hit rate: " + p.pct);
+  assert.equal(p.conf, "high");
+  assert.equal(p.at, t + 3 * H);
+});
+
+test("a precise look from the shop gives an exact restock time", () => {
+  let s = observe(undefined, { at: 0, qty: 50, cost: 1, name: "X" });
+  s = observe(s, { at: 600, qty: 0, cost: 1, precise: true });
+  assert.equal(s.emptySince, 600);
+  assert.equal(s.emptyErr, 0);
+});
+
+test("misses lower the confidence", () => {
+  const s = { qty: 0, emptySince: 0, cycles: [2 * H, 2 * H, 2 * H, 2 * H, 2 * H], starts: [], errs: [40 * M, -35 * M, 50 * M, 30 * M], method: "recent" };
+  const p = predictRestock(s, 0);
+  assert.ok(p.pct < 45, "pct " + p.pct);
+  assert.equal(p.conf, "low");
+  assert.ok(p.to - p.at >= 30 * M, "the window widens to match real misses");
+});
+
+test("the best method is learned per item: time of day", () => {
+  // Restocks take 1h at night (starts 00-04 UTC) and 3h in the day (starts 12-16 UTC).
+  const cycles = [],
+    starts = [];
+  for (let d = 0; d < 6; d++) {
+    cycles.push(H), starts.push(d * 24 * H + 2 * H);
+    cycles.push(3 * H), starts.push(d * 24 * H + 14 * H);
+  }
+  assert.equal(bestMethod(cycles, starts), "timeOfDay");
+  assert.equal(METHODS_PREDICT.timeOfDay(cycles, starts, 7 * 24 * H + 3 * H), H);
+  const s = { qty: 0, emptySince: 7 * 24 * H + 14 * H, cycles, starts, errs: [], method: "timeOfDay" };
+  assert.equal(predictRestock(s, s.emptySince).at - s.emptySince, 3 * H);
+});
+
+test("old records without start times still work", () => {
+  const s = { qty: 0, emptySince: 0, cycles: [H, H, H] };
+  assert.equal(predictRestock(s, 0).at, H);
+});
+
+// ------------------------------------------------------------ following a plan
+import { cleanPlan, activePlan } from "../src/core.js";
+
+test("a followed plan sends its own leave and get-ready alerts and replaces the general ones", () => {
+  const items = world();
+  const leaveAt = T0 + H - 2 * M - 64 * M; // general "leave now" would fire here
+  const plan = cleanPlan({ legs: [{ cc: "chi", depart: leaveAt, land: leaveAt + 69 * M, back: leaveAt + 140 * M, cash: 900000, buy: "22 × Panda Plushie" }, { cc: "jap", depart: leaveAt + 3 * H, land: leaveAt + 4 * H, back: leaveAt + 5 * H, cash: 16e6, buy: "22 × Xanax" }] });
+  let r = decideAlerts({ items, st: ME, loc: { where: "torn" }, sent: {}, now: leaveAt, plan });
+  assert.deepEqual(r.alerts.map((a) => a.key), [`planleave:chi:${leaveAt}`]);
+  assert.match(r.alerts[0].title, /China \(trip 1 of 2\)/);
+  assert.match(r.alerts[0].message, /22 × Panda Plushie\. Take \$900k/);
+  r = decideAlerts({ items, st: { ...ME, lead: 10 }, loc: { where: "torn" }, sent: {}, now: leaveAt + 3 * H - 10 * M, plan });
+  assert.equal(r.alerts[0].key, `planready:jap:${leaveAt + 3 * H}`);
+  assert.equal(activePlan(plan, leaveAt + 6 * H), null, "finished plans stop");
+});
+
+test("plans from the script are cleaned", () => {
+  assert.equal(cleanPlan({ legs: [{ cc: "xxx", depart: 5 }] }), null);
+  assert.equal(cleanPlan({ legs: [{ cc: "jap", depart: 100, buy: "x".repeat(500) }] }).legs[0].buy.length, 120);
+});

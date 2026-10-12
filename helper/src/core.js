@@ -47,36 +47,49 @@ export function speedOf(type, subType) {
 // ------------------------------------------------------------------ stock history
 // Provider data only says what a shop had when a player last looked, so a change happened somewhere between
 // two looks. We take the middle of that gap and keep a cycle only when the gap was small enough to trust.
+// A look reported by a player standing in the shop (precise: true) is exact.
 const MAX_EDGE_ERR = 20 * 60; // ignore an empty→restock cycle if either edge is unsure by more than this
-const KEEP_CYCLES = 15;
+const KEEP_CYCLES = 30;
+const KEEP_ERRS = 20;
+const HIT = 10 * 60; // a prediction within 10 minutes counts as a hit
 
-// state: the stored per-item record (or undefined). obs: { qty, cost, name, at } from the provider.
+// state: the stored per-item record (or undefined). obs: { qty, cost, name, at, precise } from a provider or a player.
 export function observe(state, obs) {
-  const s = state ? { ...state } : { name: obs.name, qty: obs.qty, cost: obs.cost, at: obs.at, cycles: [], amts: [], rate: 0, costAvg: obs.cost || 0 };
+  const s = state ? { ...state } : { name: obs.name, qty: obs.qty, cost: obs.cost, at: obs.at, cycles: [], starts: [], amts: [], errs: [], rate: 0, costAvg: obs.cost || 0 };
   if (!state) {
     if (obs.qty === 0) (s.emptySince = obs.at), (s.emptyErr = 9e9); // we don't know when it ran out
     return s;
   }
   if (obs.at <= state.at) return state; // nothing new
   const gap = obs.at - state.at;
-  const mid = Math.round(state.at + gap / 2);
+  const mid = obs.precise ? obs.at : Math.round(state.at + gap / 2);
+  const edgeErr = obs.precise ? 0 : gap / 2;
   s.name = obs.name || s.name;
 
   if (state.qty > 0 && obs.qty === 0) {
     s.emptySince = mid;
-    s.emptyErr = gap / 2;
+    s.emptyErr = edgeErr;
   } else if (state.qty === 0 && obs.qty > 0) {
     s.lastRestock = mid;
-    s.restockErr = gap / 2;
-    if (state.emptySince != null && (state.emptyErr || 0) <= MAX_EDGE_ERR && gap / 2 <= MAX_EDGE_ERR && mid > state.emptySince) {
-      s.cycles = [...(state.cycles || []), mid - state.emptySince].slice(-KEEP_CYCLES);
+    s.restockErr = edgeErr;
+    const trusted = state.emptySince != null && (state.emptyErr || 0) <= MAX_EDGE_ERR && edgeErr <= MAX_EDGE_ERR && mid > state.emptySince;
+    if (trusted) {
+      const cycles = [...(state.cycles || [])];
+      const starts = [...(state.starts || cycles.map(() => null))];
+      cycles.push(mid - state.emptySince);
+      starts.push(state.emptySince);
+      s.cycles = cycles.slice(-KEEP_CYCLES);
+      s.starts = starts.slice(-KEEP_CYCLES);
+      if (state.pending && state.pending.at) s.errs = [...(state.errs || []), mid - state.pending.at].slice(-KEEP_ERRS);
+      s.method = bestMethod(s.cycles, s.starts);
     }
     s.amts = [...(state.amts || []), obs.qty].slice(-KEEP_CYCLES);
     s.emptySince = null;
     s.emptyErr = null;
+    s.pending = null;
   } else if (state.qty > 0 && obs.qty > state.qty) {
     s.lastRestock = mid; // topped up before running out
-    s.restockErr = gap / 2;
+    s.restockErr = edgeErr;
   }
 
   // Selling speed: units that disappeared between two looks an hour or less apart.
@@ -88,13 +101,18 @@ export function observe(state, obs) {
   s.qty = obs.qty;
   s.cost = obs.cost || s.cost;
   s.at = obs.at;
+  if (state.qty > 0 && obs.qty === 0) {
+    // Remember what we predict now, so we can score it when the restock really happens.
+    const p = predictRestock(s, obs.at);
+    s.pending = p && p.at ? { at: p.at, method: p.method } : null;
+  }
   return s;
 }
 
 // Weighted quantile; newer cycles count more because Torn keeps adjusting restock timing.
-function wQuantile(values, q) {
+function wQuantile(values, q, decay = 0.85) {
   const n = values.length;
-  const pts = values.map((v, i) => ({ v, w: Math.pow(0.85, n - 1 - i) })).sort((a, b) => a.v - b.v);
+  const pts = values.map((v, i) => ({ v, w: Math.pow(decay, n - 1 - i) })).sort((a, b) => a.v - b.v);
   const total = pts.reduce((t, p) => t + p.w, 0);
   let acc = 0;
   for (const p of pts) {
@@ -103,20 +121,84 @@ function wQuantile(values, q) {
   }
   return pts[pts.length - 1].v;
 }
+const quant = (values, q) => wQuantile(values, q, 1);
 
-// When an empty item is expected back: { at, from, to, conf: "high"|"medium"|"low", n, overdue }.
+// Ways to guess how long an item stays empty. Each item uses whichever has guessed its own past restocks best.
+const hourOf = (ts) => Math.floor(ts / 3600) % 24;
+const hourGap = (a, b) => Math.min(Math.abs(a - b), 24 - Math.abs(a - b));
+export const METHODS_PREDICT = {
+  recent: (c) => wQuantile(c, 0.5),
+  median: (c) => quant(c, 0.5),
+  last3: (c) => Math.round(c.slice(-3).reduce((t, v) => t + v, 0) / Math.min(3, c.length)),
+  timeOfDay: (c, starts, start) => {
+    if (start == null) return null;
+    const near = c.filter((_, i) => starts[i] != null && hourGap(hourOf(starts[i]), hourOf(start)) <= 2);
+    return near.length >= 3 ? quant(near, 0.5) : null;
+  },
+};
+const METHOD_LABEL_PREDICT = { recent: "recent restocks", median: "all restocks", last3: "last 3 restocks", timeOfDay: "same time of day" };
+
+// Replay the history: for each past cycle, guess it from the ones before and see which method was closest.
+export function bestMethod(cycles, starts) {
+  const n = cycles.length;
+  if (n < 5) return "recent";
+  const score = {};
+  for (const m of Object.keys(METHODS_PREDICT)) {
+    const errs = [];
+    for (let i = Math.max(3, n - 10); i < n; i++) {
+      const g = METHODS_PREDICT[m](cycles.slice(0, i), (starts || []).slice(0, i), starts && starts[i]);
+      if (g != null) errs.push(Math.abs(g - cycles[i]));
+    }
+    if (errs.length >= 2) score[m] = quant(errs, 0.5);
+  }
+  let best = "recent";
+  for (const m of Object.keys(score)) if (score[m] < (score[best] ?? Infinity)) best = m;
+  return best;
+}
+
+// When an empty item is expected back:
+// { at, from, to, conf, pct, n, scored, err, method, avg, overdue }.
+// pct is a confidence % learned from how often past predictions for this item landed within 10 minutes.
 export function predictRestock(s, now) {
   if (!s || s.qty > 0 || s.emptySince == null) return null;
   const c = s.cycles || [];
-  if (!c.length) return { conf: "none", n: 0 };
-  const med = wQuantile(c, 0.5);
-  let lo = wQuantile(c, 0.25),
-    hi = wQuantile(c, 0.75);
-  lo = Math.min(lo, med - 300);
-  hi = Math.max(hi, med + 300);
-  const spread = (hi - lo) / Math.max(med, 1);
-  const conf = c.length >= 5 && spread <= 0.35 ? "high" : c.length >= 3 ? "medium" : "low";
-  const p = { at: s.emptySince + med, from: s.emptySince + lo, to: s.emptySince + hi, conf, n: c.length, avg: med };
+  if (!c.length) return { conf: "none", pct: 0, n: 0, scored: 0 };
+  const method = s.method && METHODS_PREDICT[s.method] ? s.method : "recent";
+  const guess = METHODS_PREDICT[method](c, s.starts || [], s.emptySince) ?? METHODS_PREDICT.recent(c);
+  const errs = (s.errs || []).map(Math.abs);
+  let lo, hi;
+  if (errs.length >= 3) {
+    // The window comes from how far off we've actually been.
+    const e = Math.max(300, quant(errs, 0.75));
+    lo = guess - e;
+    hi = guess + e;
+  } else {
+    lo = Math.min(wQuantile(c, 0.25), guess - 300);
+    hi = Math.max(wQuantile(c, 0.75), guess + 300);
+  }
+  let pct;
+  if (errs.length >= 3) {
+    const hits = errs.filter((e) => e <= HIT).length;
+    pct = Math.round(((hits + 1) / (errs.length + 2)) * 100);
+  } else {
+    const spread = (hi - lo) / Math.max(guess, 1);
+    pct = c.length >= 5 && spread <= 0.35 ? 70 : c.length >= 3 ? 50 : 30;
+  }
+  const conf = pct >= 70 ? "high" : pct >= 45 ? "medium" : "low";
+  const p = {
+    at: s.emptySince + guess,
+    from: s.emptySince + lo,
+    to: s.emptySince + hi,
+    conf,
+    pct,
+    n: c.length,
+    scored: errs.length,
+    err: errs.length ? Math.round(quant(errs, 0.5)) : null,
+    hits: errs.filter((e) => e <= HIT).length,
+    method,
+    methodLabel: METHOD_LABEL_PREDICT[method],
+    avg: guess,
+  };
   if (now > p.to + 15 * 60) p.overdue = true;
   return p;
 }
@@ -168,6 +250,7 @@ export function buildItems(countries, prices, now, types) {
         emptySince: s.emptySince ?? null,
         lastRestock: s.lastRestock ?? null,
         amt: s.amts && s.amts.length ? s.amts[s.amts.length - 1] : 0,
+        amtTypical: s.amts && s.amts.length ? quant(s.amts.slice(-10), 0.5) : 0,
         pred: predictRestock(s, now),
         type,
         speed: speedOf(type, ty.st),
@@ -293,10 +376,12 @@ export function candidates(items, st) {
 
 // Decide what to send now. sent: { alertKey: unix seconds } of what this person already got.
 // Returns { alerts: [...], suppressed: [...keys] }; at most 2 alerts per minute.
-export function decideAlerts({ items, st, loc, sent, now }) {
+// plan: a trip plan the player chose to follow ({ legs: [{ cc, depart, land, buy, cash }] }), or null.
+export function decideAlerts({ items, st, loc, sent, now, plan }) {
   st = cleanSettings(st);
   sent = sent || {};
   const out = [];
+  const following = activePlan(plan, now);
   const add = (type, key, title, message, profit, priority) => {
     if (!st.types[type] || sent[key]) return;
     out.push({ type, key, title, message, profit, priority: priority || 3, click: TRAVEL_URL, tags: [] });
@@ -305,7 +390,23 @@ export function decideAlerts({ items, st, loc, sent, now }) {
   const t = (ts) => clock(ts, st.tz);
   const tail = (it) => `Est. profit ${short(it.me.trip)} for ${it.me.units} items. Take ${short(it.me.cash)}.`;
 
-  if (loc.where === "torn") {
+  if (following) {
+    // While following a plan, its departures replace the general leave/get-ready/restocked alerts.
+    const legs = following.legs;
+    legs.forEach((g, i) => {
+      const c = COUNTRIES[g.cc];
+      if (!c) return;
+      const step = `trip ${i + 1} of ${legs.length}`;
+      const what = `${g.buy ? g.buy + ". " : ""}${g.cash ? `Take ${short(g.cash)}. ` : ""}Land ${t(g.land)}.`;
+      if (loc.where === "torn" && now >= g.depart - 60 && now < g.depart + 5 * 60)
+        add("leave", `planleave:${g.cc}:${g.depart}`, `🛫 Leave now for ${c.name} (${step})`, what, 1e15, 5);
+      const early = g.depart - st.lead * 60;
+      if (st.lead > 0 && now >= early - 60 && now < early + 3 * 60)
+        add("ready", `planready:${g.cc}:${g.depart}`, `⏰ Get ready: ${c.name} at ${t(g.depart)} (${step})`, what, 1e15, 4);
+    });
+  }
+
+  if (loc.where === "torn" && !following) {
     for (const it of list) {
       const c = COUNTRIES[it.cc];
       const fl = it.me.flight;
@@ -374,6 +475,27 @@ export function decideAlerts({ items, st, loc, sent, now }) {
   const lastHour = Object.values(sent).filter((ts) => ts > now - 3600).length;
   const room = Math.max(0, Math.min(2, st.maxPerHour - lastHour));
   return { alerts: out.slice(0, room), suppressed: [] };
+}
+
+// A followed plan counts until its last trip is back in Torn.
+export function activePlan(plan, now) {
+  if (!plan || !Array.isArray(plan.legs) || !plan.legs.length) return null;
+  const last = plan.legs[plan.legs.length - 1];
+  return now <= (last.back || last.land || last.depart) + 600 ? plan : null;
+}
+export function cleanPlan(raw) {
+  const legs = (raw && Array.isArray(raw.legs) ? raw.legs : [])
+    .slice(0, 12)
+    .map((g) => ({
+      cc: COUNTRIES[g && g.cc] ? g.cc : null,
+      depart: Math.round(+g.depart || 0),
+      land: Math.round(+g.land || 0),
+      back: Math.round(+g.back || 0),
+      cash: Math.max(0, Math.round(+g.cash || 0)),
+      buy: String((g && g.buy) || "").slice(0, 120),
+    }))
+    .filter((g) => g.cc && g.depart > 0);
+  return legs.length ? { legs, made: Math.round(+raw.made || 0) } : null;
 }
 
 // Forget alert keys older than three days.
