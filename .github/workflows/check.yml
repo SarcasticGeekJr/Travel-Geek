@@ -25,3 +25,16 @@ jobs:
           for i in sorted(items, key=lambda i: -((i.get("sell") or 0) - i.get("cost", 0)))[:15]:
               print(f'{i["key"]:9} {i["name"][:22]:22} qty {i["qty"]:>6} cost {i["cost"]:>9} sell {i.get("sell", 0):>9} {i.get("type", "")} ({i.get("speed")}) pred {i.get("pred")}')
           PY
+      - name: How many bazaars sell each travel item
+        run: |
+          curl -sS -m 30 https://weav3r.dev/api/marketplace -o w3b.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open("w3b.json"))["items"]
+          names = ["Xanax", "Jaguar Plushie", "Camel Plushie", "Panda Plushie", "Ceibo Flower", "Tribulus Omanense", "Raw Ivory", "Ambergris Lump", "Natural Pearls", "Pangolin Scales", "Patagonian Fossil", "Hydrochloric Acid", "Neumune Tablet", "Smoke Grenade", "Large Suitcase", "Combat Pants", "Dual 92G Berettas", "Cherry Blossom", "Edelweiss", "Chamois Plushie"]
+          for i in d:
+              if i.get("item_name") in names:
+                  print(f'{i["item_name"]:22} bazaars {i.get("total_bazaars")}  mv {i.get("market_price")}')
+          vals = sorted(i.get("total_bazaars") or 0 for i in d)
+          print("all items: median bazaars", vals[len(vals)//2], "| 75th", vals[len(vals)*3//4], "| 90th", vals[len(vals)*9//10])
+          PY
