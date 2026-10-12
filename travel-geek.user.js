@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.1.0
+// @version      1.2.0
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -39,7 +39,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.1.0"; // keep in sync with @version above
+  const VERSION = "1.2.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.user.js";
   const DEFAULT_HELPER = "https://travel-geek.sakthiramkumar12.workers.dev";
   const YATA = "https://yata.yt/api/v1/travel/export/";
@@ -69,10 +69,16 @@
   // Item types come from the Torn API (weapons are "Weapon" with a sub_type such as "Temporary").
   const FAST = ["plushie", "flower", "drug", "medical", "booster", "candy", "alcohol", "energy drink", "temporary"];
   const SLOW = ["weapon", "primary", "secondary", "melee", "defensive", "armor", "clothing", "jewelry", "collectible", "artifact", "car"];
-  const speedOf = (type, sub) => {
+  // Other types (contraband, materials…): a busy market (sold in 200+ bazaars, like Xanax or plushies) sells fast,
+  // a quiet one (under 80) slowly. Guns and armour stay slow either way.
+  const speedOf = (type, sub, bazaars) => {
     const t = String(type || "").toLowerCase();
     if (t === "weapon" && String(sub || "").toLowerCase() === "temporary") return "fast";
-    return !t ? "unknown" : FAST.includes(t) ? "fast" : SLOW.includes(t) ? "slow" : "medium";
+    if (FAST.includes(t)) return "fast";
+    if (SLOW.includes(t)) return "slow";
+    if (bazaars >= 200) return "fast";
+    if (bazaars > 0 && bazaars < 80) return "slow";
+    return t ? "medium" : "unknown";
   };
 
   const DEFAULTS = {
@@ -110,6 +116,8 @@
     moneyOrder: ["vault", "faction", "stocks", "points"],
     capSeen: {}, // ticket -> { cap, at }, read from the foreign shop
     follow: null, // the plan sent to the helper for alerts
+    crowdShare: false, // let other Travel Geek players see (without your name) where and when you land
+    crowdWarn: false, // show when others land at the same shop around the same time
   };
 
   // ---------------------------------------------------------------- storage
@@ -466,7 +474,7 @@
     if (h) {
       try {
         const d = await cached(h + "/api/state", 50 * 1000, force);
-        data = { at: nowS(), fromHelper: true, items: d.items || [], updates: d.updates || {}, source: d.source || "", tickAt: d.tickAt, pricesAt: d.pricesAt };
+        data = { at: nowS(), fromHelper: true, items: d.items || [], updates: d.updates || {}, source: d.source || "", tickAt: d.tickAt, pricesAt: d.pricesAt, crowd: d.crowd || [] };
         store.set("data", data);
         return data;
       } catch (e) {
@@ -508,7 +516,8 @@
           lastRestock: null,
           pred: null,
           type: pr.type || "",
-          speed: speedOf(pr.type),
+          speed: speedOf(pr.type, null, pr.total_bazaars),
+          bz: pr.total_bazaars || 0,
           mv: pr.market_price || 0,
           low: pr.lowest_price || 0,
           sell: isFinite(sell) ? sell : 0,
@@ -741,7 +750,7 @@
     if (!data || !types) return;
     for (const it of data.items) {
       const t = types.map[it.id];
-      if (!it.type && t) (it.type = t[0]), (it.speed = speedOf(t[0], t[1]));
+      if (!it.type && t) (it.type = t[0]), (it.speed = speedOf(t[0], t[1], it.bz));
     }
   }
 
@@ -799,6 +808,8 @@
       types: S.types,
       extraFlower: S.extraFlower || ((me && me.cap && me.cap.extra.flower) || 0),
       extraPlushie: S.extraPlushie || ((me && me.cap && me.cap.extra.plushie) || 0),
+      crowdShare: S.crowdShare,
+      crowdWarn: S.crowdWarn,
     };
   }
   const newTopic = () => "travelgeek-" + Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => "abcdefghijkmnpqrstuvwxyz23456789"[b % 32]).join("");
@@ -815,7 +826,7 @@
     if (!manual && syncState && syncState.ok && syncState.sig === sig) return syncState; // nothing changed
     try {
       const r = await httpSend("POST", helperUrl() + "/api/user", body);
-      syncState = { at: nowS(), ok: true, name: r.name, sig, last: r.last || [], loc: r.loc };
+      syncState = { at: nowS(), ok: true, name: r.name, sig, last: r.last || [], loc: r.loc, h: r.h };
     } catch (e) {
       syncState = { at: nowS(), ok: false, err: e.message, sig: "" };
     }
@@ -1128,6 +1139,17 @@
       s = d % 60;
     return "in " + (h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`);
   };
+  // Other sharing players landing in the same country within 10 minutes of this trip (never yourself).
+  function crowdFor(g) {
+    if (!S.crowdWarn || !data || !data.crowd) return 0;
+    let list = data.crowd.filter((x) => x.cc === g.cc && Math.abs(x.land - g.land) <= 600 && !(syncState && x.h === syncState.h));
+    // Your own followed trip is in the list too if you share; drop it even after the daily id changes.
+    if (S.crowdShare && S.follow && S.follow.legs.some((f) => f.cc === g.cc && Math.abs(f.depart - g.depart) < 90)) {
+      const i = list.findIndex((x) => Math.abs(x.land - g.land) < 90);
+      if (i >= 0) list = list.filter((_, j) => j !== i);
+    }
+    return list.length;
+  }
   const buyText = (g) => g.buys.map((b) => `${b.units} × ${b.name}`).join(" + ");
   function legHtml(g, i, step) {
     const c = COUNTRIES[g.cc];
@@ -1150,7 +1172,18 @@
       ${lines}
       <div class="small">Take <b>${short(g.cash)}</b> · profit <b class="g">+${short(g.best)}</b> <span class="muted">(expected +${short(g.exp)})</span></div>
       ${moneyLine}
+      ${crowdLine(g)}
     </div>`;
+  }
+  function crowdLine(g) {
+    const n = crowdFor(g);
+    if (!n) return "";
+    const tight = g.buys.some((b) => {
+      const it = findItem(b.key);
+      const size = it ? (it.qty > 0 ? it.qty : it.amtTypical || it.amt || 0) : 0;
+      return size && size < (n + 1) * b.units;
+    });
+    return `<div class="a small">⚠️ ${n} other Travel Geek player${n > 1 ? "s" : ""} land in ${esc(COUNTRIES[g.cc].name)} within 10 min of you.${tight ? " There may not be enough stock for everyone." : ""}</div>`;
   }
   function planSummary(p, label) {
     const back = p.legs[p.legs.length - 1].back;
@@ -1352,7 +1385,7 @@
       </div>
       <div class="stats">
         <div class="stat"><span>Buy abroad</span><b>${money(it.cost)}</b>${cheap}</div>
-        <div class="stat"><span>Sell here</span><b>${it.sell ? money(it.sell) : "—"}</b><small>MV ${short(it.mv || null)} · bazaar ${short(it.low || null)}</small></div>
+        <div class="stat"><span>Sell here</span><b>${it.sell ? money(it.sell) : "—"}</b><small>MV ${short(it.mv || null)} · bazaar ${short(it.low || null)}${it.bz ? ` · in ${num(it.bz)} bazaars` : ""}</small></div>
         <div class="stat"><span>Profit per item</span><b class="${p.unit > 0 ? "g" : "r"}">${money(p.unit)}</b><small>after ${+S.fee || 0}% fee</small></div>
         <div class="stat"><span>Profit per trip</span><b class="${p.trip > 0 ? "g" : "r"}">${short(p.trip)}</b><small>${p.units} items${p.units < p.cap ? ` (only ${num(it.qty)} left)` : ""}</small></div>
         <div class="stat"><span>Per hour of flying</span><b>${short(p.perHour)}</b><small>${dur(2 * p.flight)} round trip</small></div>
@@ -1478,6 +1511,10 @@
         ${tog("soldout", "⚠️ <b>Sold out</b> while you're flying there (with a backup pick)")}
         ${tog("restock", "🔔 <b>Restocked here</b> while you're abroad")}
         ${tog("cheap", "💸 <b>Cheap</b>: an item is 15%+ under its usual price abroad")}
+
+        <h3>Crowd warning (optional)</h3>
+        <label class="tog"><input type="checkbox" data-s="crowdShare" ${S.crowdShare ? "checked" : ""}><span>Share where and when I land<small class="muted">Other players see only the country and time, never your name.</small></span></label>
+        <label class="tog"><input type="checkbox" data-s="crowdWarn" ${S.crowdWarn ? "checked" : ""}><span>Warn me when others land at the same shop<small class="muted">Counts only players who share, landing within 10 minutes of you.</small></span></label>
 
         <h3>Which items</h3>
         <label class="tog">Only if profit per trip is at least<input class="num wide" data-m="minProfit" inputmode="decimal" value="${short(S.minProfit).slice(1)}"></label>

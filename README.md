@@ -33,7 +33,7 @@ Tells you which trips to make, in order, for the most profit in the time you hav
 
 - **✈️ button** on every Torn page. The green number on it = good runs you could start right now.
 - **Your setup, worked out for you:** how many items you can carry, from your perks (airstrip, suitcase, job, faction, books), and your ticket type (from your last trip). Fix it in ⚙ → Your setup only if it's wrong.
-- **Best runs:** every item abroad with profit per trip (for what *you* can carry, after the 5% fee) and profit per hour of flying. A **sells fast / slowly** badge, so cheap guns and armour that are hard to sell don't fool you.
+- **Best runs:** every item abroad with profit per trip (for what *you* can carry, after the 5% fee) and profit per hour of flying. A **sells fast / slowly** badge, so cheap guns and armour that are hard to sell don't fool you. For other items (like the newer contraband), a market with 200+ bazaars selling it counts as fast and one with under 80 as slow.
 - **When to leave:** for empty items, "Leave at 17:42 → land 18:46 for the restock ~18:48", with how sure it is (high / medium / low) and the restock window.
 - **Cash to take:** the exact amount, so you don't carry extra money abroad.
 - **⏰ Remind me** (Torn PDA): a phone reminder at your leave time.
@@ -52,6 +52,8 @@ A small helper runs in the cloud every minute, day and night. It watches stock, 
 - 🔔 **Restocked here** while you're abroad
 - 💸 **Cheap**: an item is 15%+ under its usual price
 
+**Crowd warning (optional, off by default):** if you turn on "Share where and when I land", other Travel Geek players can see the country and landing time of your trips (never your name). If you turn on "Warn me", trips and alerts tell you when other sharing players land at the same shop within 10 minutes of you, and whether there may not be enough stock for everyone.
+
 It won't alert you while you're in hospital or jail. You can set quiet hours, a minimum profit (default $1m per trip), only fast sellers, only ⭐ items, and a maximum per hour.
 
 **Turn it on:** ✈️ → ⚙ → Phone alerts → tick "Send alerts to my phone" → install ntfy → subscribe to the channel name shown → "Send a test alert".
@@ -66,6 +68,7 @@ When phone alerts are on, your key is stored on the helper and used about once a
 | Perks | This device only | No | Work out what you can carry | Limited |
 | Money (wallet, vault, networth, faction balance) | This device only | No | Plan within the money you can use | Limited |
 | Shop stock you see abroad | Helper (stock only) | Feeds everyone's predictions | Exact restock times | Your key is used once to check you're in that country |
+| Country and landing time of your trips (only if you turn on sharing) | Helper | Yes, without your name | Crowd warning for others | — |
 
 ## Good to know
 

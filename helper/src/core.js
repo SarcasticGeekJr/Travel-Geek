@@ -35,13 +35,18 @@ export const flightSec = (cc, method) => ((COUNTRIES[cc] && COUNTRIES[cc].min[me
 // Types come from the Torn API (v2 torn/items): weapons are "Weapon" with a sub_type such as "Temporary".
 const FAST = ["plushie", "flower", "drug", "medical", "booster", "candy", "alcohol", "energy drink", "temporary"];
 const SLOW = ["weapon", "primary", "secondary", "melee", "defensive", "armor", "clothing", "jewelry", "collectible", "artifact", "car"];
-export function speedOf(type, subType) {
+// For other types (contraband, materials…), how many bazaars sell it tells how busy its market is:
+// easy sellers like Xanax and plushies are in 300–900 bazaars, rarely traded items in under 80.
+export const BUSY_BAZAARS = 200,
+  QUIET_BAZAARS = 80;
+export function speedOf(type, subType, bazaars) {
   const t = String(type || "").toLowerCase();
-  if (!t) return "unknown";
   if (t === "weapon" && String(subType || "").toLowerCase() === "temporary") return "fast";
   if (FAST.includes(t)) return "fast";
   if (SLOW.includes(t)) return "slow";
-  return "medium";
+  if (bazaars >= BUSY_BAZAARS) return "fast";
+  if (bazaars > 0 && bazaars < QUIET_BAZAARS) return "slow";
+  return t ? "medium" : "unknown";
 }
 
 // ------------------------------------------------------------------ stock history
@@ -253,7 +258,8 @@ export function buildItems(countries, prices, now, types) {
         amtTypical: s.amts && s.amts.length ? quant(s.amts.slice(-10), 0.5) : 0,
         pred: predictRestock(s, now),
         type,
-        speed: speedOf(type, ty.st),
+        speed: speedOf(type, ty.st, p && p.bz),
+        bz: (p && p.bz) || 0,
         mv: (p && p.mv) || 0,
         low: (p && p.low) || 0,
         sell: sellPrice(p),
@@ -298,6 +304,8 @@ export const DEFAULT_SETTINGS = {
   types: { leave: true, ready: true, go: true, soldout: true, restock: true, cheap: true },
   extraFlower: 0,
   extraPlushie: 0,
+  crowdShare: false, // let others see (without a name) where and when I land
+  crowdWarn: false, // tell me when others land at the same shop around the same time
 };
 
 const clampInt = (v, lo, hi, d) => (Number.isFinite(+v) ? Math.min(hi, Math.max(lo, Math.round(+v))) : d);
@@ -324,6 +332,8 @@ export function cleanSettings(raw) {
     types,
     extraFlower: clampInt(r.extraFlower, 0, 50, 0),
     extraPlushie: clampInt(r.extraPlushie, 0, 50, 0),
+    crowdShare: !!r.crowdShare,
+    crowdWarn: !!r.crowdWarn,
   };
 }
 
@@ -377,7 +387,7 @@ export function candidates(items, st) {
 // Decide what to send now. sent: { alertKey: unix seconds } of what this person already got.
 // Returns { alerts: [...], suppressed: [...keys] }; at most 2 alerts per minute.
 // plan: a trip plan the player chose to follow ({ legs: [{ cc, depart, land, buy, cash }] }), or null.
-export function decideAlerts({ items, st, loc, sent, now, plan }) {
+export function decideAlerts({ items, st, loc, sent, now, plan, crowd, selfH }) {
   st = cleanSettings(st);
   sent = sent || {};
   const out = [];
@@ -397,7 +407,7 @@ export function decideAlerts({ items, st, loc, sent, now, plan }) {
       const c = COUNTRIES[g.cc];
       if (!c) return;
       const step = `trip ${i + 1} of ${legs.length}`;
-      const what = `${g.buy ? g.buy + ". " : ""}${g.cash ? `Take ${short(g.cash)}. ` : ""}Land ${t(g.land)}.`;
+      const what = `${g.buy ? g.buy + ". " : ""}${g.cash ? `Take ${short(g.cash)}. ` : ""}Land ${t(g.land)}.${st.crowdWarn ? crowdText(crowdNear(crowd, g.cc, g.land, selfH)) : ""}`;
       if (loc.where === "torn" && now >= g.depart - 60 && now < g.depart + 5 * 60)
         add("leave", `planleave:${g.cc}:${g.depart}`, `🛫 Leave now for ${c.name} (${step})`, what, 1e15, 5);
       const early = g.depart - st.lead * 60;
@@ -414,7 +424,7 @@ export function decideAlerts({ items, st, loc, sent, now, plan }) {
       if (it.qty === 0 && it.pred && it.pred.at && !it.pred.overdue) {
         const land = it.pred.at - 120; // land a couple of minutes before the expected restock
         const leaveAt = land - fl;
-        const why = `${it.name} restock expected ~${t(it.pred.at)} (${it.pred.conf} confidence, ${t(it.pred.from)}–${t(it.pred.to)}).`;
+        const why = `${it.name} restock expected ~${t(it.pred.at)} (${it.pred.pct != null ? it.pred.pct + "% sure" : it.pred.conf + " confidence"}, ${t(it.pred.from)}–${t(it.pred.to)}).${st.crowdWarn ? crowdText(crowdNear(crowd, it.cc, land + 120, selfH)) : ""}`;
         if (now >= leaveAt - 60 && now < leaveAt + 5 * 60 && now + fl < it.pred.to)
           add("leave", `leave:${it.key}:${it.emptySince}`, `🛫 Leave now for ${c.name}`, `${why} Flight ${mins} min → land ${t(now + fl)}. ${tail(it)}`, it.me.trip, 5);
         const early = leaveAt - st.lead * 60;
@@ -476,6 +486,29 @@ export function decideAlerts({ items, st, loc, sent, now, plan }) {
   const room = Math.max(0, Math.min(2, st.maxPerHour - lastHour));
   return { alerts: out.slice(0, room), suppressed: [] };
 }
+
+// ---------------------------------------------------------------- crowd warning
+// Only players who turned on sharing are counted, by country and landing time, never by name.
+export function crowdHash(id, now) {
+  let h = 2166136261;
+  for (const ch of `${id}:${Math.floor(now / 86400)}:tg`) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+  return (h >>> 0).toString(36);
+}
+// Where sharing players will land: their current flight and their followed plan's trips.
+export function crowdEntries(users, now) {
+  const out = [];
+  for (const u of users) {
+    if (!u.settings || !u.settings.crowdShare || u.off) continue;
+    const h = crowdHash(u.id, now);
+    if (u.loc && u.loc.where === "flying" && u.loc.cc && u.loc.arriveAt > now - 600) out.push({ h, cc: u.loc.cc, land: u.loc.arriveAt });
+    for (const g of (activePlan(u.plan, now) || { legs: [] }).legs) if (g.land > now - 600 && !out.some((x) => x.h === h && x.cc === g.cc && Math.abs(x.land - g.land) < 900)) out.push({ h, cc: g.cc, land: g.land });
+  }
+  return out;
+}
+export function crowdNear(crowd, cc, land, selfH) {
+  return (crowd || []).filter((x) => x.h !== selfH && x.cc === cc && Math.abs(x.land - land) <= 600).length;
+}
+const crowdText = (n) => (n ? ` ⚠️ ${n} other Travel Geek player${n > 1 ? "s" : ""} land there around then.` : "");
 
 // A followed plan counts until its last trip is back in Torn.
 export function activePlan(plan, now) {

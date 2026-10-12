@@ -316,3 +316,40 @@ test("plans from the script are cleaned", () => {
   assert.equal(cleanPlan({ legs: [{ cc: "xxx", depart: 5 }] }), null);
   assert.equal(cleanPlan({ legs: [{ cc: "jap", depart: 100, buy: "x".repeat(500) }] }).legs[0].buy.length, 120);
 });
+
+// ------------------------------------------------------------ crowd warning and busy markets
+import { crowdEntries, crowdNear, crowdHash } from "../src/core.js";
+
+test("busy markets count as fast sellers; guns and armour stay slow", () => {
+  assert.equal(speedOf("Other", "", 240), "fast"); // Raw Ivory
+  assert.equal(speedOf("Other", "", 32), "slow"); // Ambergris Lump
+  assert.equal(speedOf("Other", "", 120), "medium");
+  assert.equal(speedOf("Armor", "", 487), "slow"); // Combat Pants
+  assert.equal(speedOf("Weapon", "Pistol", 900), "slow");
+  assert.equal(speedOf("", "", 0), "unknown");
+});
+
+test("crowd: only sharing players count, near your landing, never yourself", () => {
+  const now = T0;
+  const users = [
+    { id: 1, settings: { crowdShare: true }, loc: { where: "flying", cc: "jap", arriveAt: now + 3000 } },
+    { id: 2, settings: { crowdShare: true }, plan: cleanPlan({ legs: [{ cc: "jap", depart: now, land: now + 3300, back: now + 7000 }] }) },
+    { id: 3, settings: { crowdShare: false }, loc: { where: "flying", cc: "jap", arriveAt: now + 3000 } },
+    { id: 4, settings: { crowdShare: true }, loc: { where: "flying", cc: "jap", arriveAt: now + 9000 } },
+  ];
+  const crowd = crowdEntries(users, now);
+  assert.equal(crowd.length, 3, "player 3 doesn't share");
+  assert.ok(crowd.every((x) => !("id" in x)), "no ids or names");
+  assert.equal(crowdNear(crowd, "jap", now + 3100, crowdHash(1, now)), 1, "only player 2: player 1 is me, player 4 lands much later");
+});
+
+test("crowd text is added to leave alerts for players who asked for it", () => {
+  const items = world();
+  const leaveAt = T0 + H - 2 * M - 64 * M;
+  const land = leaveAt + 64 * M;
+  const crowd = [{ h: "x", cc: "jap", land: land + 60 }, { h: "y", cc: "jap", land: land - 120 }];
+  let r = decideAlerts({ items, st: { ...ME, crowdWarn: true }, loc: { where: "torn" }, sent: {}, now: leaveAt, crowd, selfH: "me" });
+  assert.match(r.alerts[0].message, /2 other Travel Geek players land there around then/);
+  r = decideAlerts({ items, st: ME, loc: { where: "torn" }, sent: {}, now: leaveAt, crowd, selfH: "me" });
+  assert.doesNotMatch(r.alerts[0].message, /other Travel Geek/);
+});

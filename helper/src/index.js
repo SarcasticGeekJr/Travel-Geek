@@ -5,9 +5,9 @@
 // It only reads data and sends notifications. It never acts in the game.
 
 import { DurableObject } from "cloudflare:workers";
-import { COUNTRIES, buildItems, observe, location, decideAlerts, pruneSent, cleanSettings, cleanPlan, countryCode } from "./core.js";
+import { COUNTRIES, buildItems, observe, location, decideAlerts, pruneSent, cleanSettings, cleanPlan, countryCode, crowdEntries, crowdHash } from "./core.js";
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const PRICES_EVERY = 10 * 60; // seconds
 const TYPES_EVERY = 24 * 3600;
 const MAX_USERS = 40; // keeps a tick under the free plan's 50 outgoing requests
@@ -84,7 +84,9 @@ export class Hub extends DurableObject {
     ]);
     const items = buildItems(countries, prices && prices.items, t, types && types.map);
     const updates = Object.fromEntries(Object.entries(countries).map(([cc, c]) => [cc, c.update || 0]));
-    return { version: VERSION, now: t, report: report || null, tickAt: (meta && meta.tickAt) || 0, source: (meta && meta.source) || "", pricesAt: (prices && prices.at) || 0, updates, items };
+    const users = (await this.ctx.storage.get("users")) || {};
+    const crowd = crowdEntries(Object.values(users), t);
+    return { version: VERSION, now: t, report: report || null, tickAt: (meta && meta.tickAt) || 0, source: (meta && meta.source) || "", pricesAt: (prices && prices.at) || 0, updates, items, crowd };
   }
 
   async readStocks() {
@@ -140,7 +142,7 @@ export class Hub extends DurableObject {
         const d = await getJSON(this.url.w3b, 20000);
         const wanted = new Set(Object.values(countries).flatMap((c) => Object.keys(c.items || {})));
         const items = {};
-        for (const i of d.items || []) if (wanted.has(String(i.item_id))) items[i.item_id] = { mv: i.market_price || 0, low: i.lowest_price || 0, type: i.type || "" };
+        for (const i of d.items || []) if (wanted.has(String(i.item_id))) items[i.item_id] = { mv: i.market_price || 0, low: i.lowest_price || 0, type: i.type || "", bz: i.total_bazaars || 0 };
         prices = { at: t, items };
         await this.ctx.storage.put("prices", prices);
       } catch (e) {
@@ -166,7 +168,8 @@ export class Hub extends DurableObject {
       }
     }
     const items = buildItems(countries, prices && prices.items, t, types && types.map);
-    await Promise.all(active.map((u) => this.checkUser(u, items, t, report)));
+    const crowd = crowdEntries(active, t);
+    await Promise.all(active.map((u) => this.checkUser(u, items, t, report, crowd)));
     // Someone may have signed up or changed settings while we were waiting on the network:
     // re-read and only write back what this tick learned.
     const fresh = (await this.ctx.storage.get("users")) || {};
@@ -193,7 +196,7 @@ export class Hub extends DurableObject {
     return d;
   }
 
-  async checkUser(u, items, t, report) {
+  async checkUser(u, items, t, report, crowd) {
     report.users++;
     let d;
     try {
@@ -219,7 +222,7 @@ export class Hub extends DurableObject {
     const loc = location(d, t);
     u.loc = { ...loc, at: t };
     const sent = pruneSent(u.sent, t);
-    const { alerts, suppressed } = decideAlerts({ items, st: u.settings, loc, sent, now: t, plan: u.plan });
+    const { alerts, suppressed } = decideAlerts({ items, st: u.settings, loc, sent, now: t, plan: u.plan, crowd, selfH: crowdHash(u.id, t) });
     for (const k of suppressed) sent[k] = t;
     for (const a of alerts) {
       try {
@@ -269,7 +272,7 @@ export class Hub extends DurableObject {
     };
     await this.ctx.storage.put("users", users);
     const u = users[me.player_id];
-    return { ok: true, id: u.id, name: u.name, loc: u.loc || null, last: u.last || [] };
+    return { ok: true, id: u.id, name: u.name, loc: u.loc || null, last: u.last || [], h: crowdHash(u.id, now()) };
   }
 
   // A player standing in a foreign shop reports exactly what it has. Checked against their status, so only
