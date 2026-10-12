@@ -304,7 +304,8 @@ export const DEFAULT_SETTINGS = {
   maxPerHour: 6,
   quiet: { on: false, from: 23 * 60, to: 7 * 60 },
   tz: 0, // minutes to add to UTC for local time (−Date#getTimezoneOffset)
-  types: { leave: true, ready: true, go: true, soldout: true, restock: true, cheap: true },
+  types: { leave: true, ready: true, go: true, soldout: true, restock: true, cheap: true, land: true, cash: true },
+  cashLimit: 1_000_000, // Cash Guard: warn when this much cash is on hand while flying or landing
   extraFlower: 0,
   extraPlushie: 0,
   crowdShare: false, // let others see (without a name) where and when I land
@@ -335,6 +336,7 @@ export function cleanSettings(raw) {
     types,
     extraFlower: clampInt(r.extraFlower, 0, 50, 0),
     extraPlushie: clampInt(r.extraPlushie, 0, 50, 0),
+    cashLimit: clampInt(r.cashLimit, 0, 1e12, d.cashLimit),
     crowdShare: !!r.crowdShare,
     crowdWarn: !!r.crowdWarn,
   };
@@ -364,6 +366,7 @@ export function short(n) {
 const num = (n) => Math.round(n).toLocaleString("en-US");
 
 const TRAVEL_URL = "https://www.torn.com/page.php?sid=travel";
+const VAULT_URL = "https://www.torn.com/properties.php#/p=options&tab=vault";
 const RANK = { leave: 0, soldout: 1, restock: 2, go: 3, ready: 4, cheap: 5 };
 const FRESH = 45 * 60; // stock seen longer ago than this is too old to send someone flying
 const JUST_RESTOCKED = 30 * 60;
@@ -390,7 +393,8 @@ export function candidates(items, st) {
 // Decide what to send now. sent: { alertKey: unix seconds } of what this person already got.
 // Returns { alerts: [...], suppressed: [...keys] }; at most 2 alerts per minute.
 // plan: a trip plan the player chose to follow ({ legs: [{ cc, depart, land, buy, cash }] }), or null.
-export function decideAlerts({ items, st, loc, sent, now, plan, crowd, selfH }) {
+// cash: cash on hand right now (or null if unknown). prevLoc: where they were on the previous check.
+export function decideAlerts({ items, st, loc, sent, now, plan, crowd, selfH, cash, prevLoc }) {
   st = cleanSettings(st);
   sent = sent || {};
   const out = [];
@@ -483,11 +487,38 @@ export function decideAlerts({ items, st, loc, sent, now, plan, crowd, selfH }) 
     }
   }
 
+  // ---- Cash Guard: muggers watch for players landing with bazaar money on hand.
+  const guard = [];
+  const addG = (type, key, title, message, priority) => {
+    if (!st.types[type] || sent[key]) return;
+    guard.push({ type, key, title, message, priority, click: type === "land" ? TRAVEL_URL : VAULT_URL, tags: [], guard: true });
+  };
+  const risky = cash != null && st.cashLimit > 0 && cash >= st.cashLimit;
+  const onHand = cash != null ? ` · ${short(cash)} on hand` : "";
+  if ((loc.where === "flying" || loc.where === "returning") && loc.arriveAt > now) {
+    const place = loc.where === "returning" ? "Torn" : COUNTRIES[loc.cc] ? COUNTRIES[loc.cc].name : "abroad";
+    const left = loc.arriveAt - now;
+    const tip = risky ? "Deposit it the moment you land: muggers watch landings." : "Be online when you land.";
+    if (left > 120 && left <= 240) addG("land", `land3:${loc.arriveAt}`, `🛬 Landing in ${place} in ~${Math.round(left / 60)} min${onHand}`, tip, risky ? 5 : 4);
+    if (left > 0 && left <= 120) addG("land", `land1:${loc.arriveAt}`, `🛬 Landing in ${place} in about a minute${onHand}`, tip, risky ? 5 : 4);
+    if (risky)
+      addG(
+        "cash",
+        `cash:${loc.arriveAt}:${Math.floor(Math.log2(cash / st.cashLimit))}`, // again each time it doubles
+        `💰 ${short(cash)} on hand while you're flying`,
+        `Bazaar sales add to your cash on hand, and you can't bank in the air. You land in ${place} at ${t(loc.arriveAt)}. Deposit right after landing.`,
+        5
+      );
+  }
+  if (prevLoc && (prevLoc.where === "flying" || prevLoc.where === "returning") && (loc.where === "torn" || loc.where === "abroad") && risky)
+    addG("cash", `landed:${prevLoc.arriveAt || now}`, `🛬 You landed with ${short(cash)} on hand`, loc.where === "torn" ? "Deposit it now (vault, bank or faction)." : "You're abroad: keep it safe until you're home.", 5);
+
   out.sort((a, b) => RANK[a.type] - RANK[b.type] || b.profit - a.profit);
-  if (isQuiet(st, now)) return { alerts: [], suppressed: out.map((a) => a.key) };
+  if (isQuiet(st, now)) return { alerts: [], suppressed: [...out, ...guard].map((a) => a.key) };
   const lastHour = Object.values(sent).filter((ts) => ts > now - 3600).length;
   const room = Math.max(0, Math.min(2, st.maxPerHour - lastHour));
-  return { alerts: out.slice(0, room), suppressed: [] };
+  // Cash Guard alerts don't count against the hourly limit: they protect your money.
+  return { alerts: [...guard, ...out.slice(0, room)], suppressed: [] };
 }
 
 // ---------------------------------------------------------------- crowd warning

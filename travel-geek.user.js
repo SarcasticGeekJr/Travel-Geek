@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.2.1
+// @version      1.3.0
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -39,7 +39,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.2.1"; // keep in sync with @version above
+  const VERSION = "1.3.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.user.js";
   const DEFAULT_HELPER = "https://travel-geek.sakthiramkumar12.workers.dev";
   const YATA = "https://yata.yt/api/v1/travel/export/";
@@ -103,7 +103,15 @@
     lead: 10,
     maxPerHour: 6,
     quiet: { on: false, from: 23 * 60, to: 7 * 60 },
-    types: { leave: true, ready: true, go: true, soldout: true, restock: true, cheap: true },
+    types: { leave: true, ready: true, go: true, soldout: true, restock: true, cheap: true, land: true, cash: true },
+    // Cash Guard
+    cashGuard: true,
+    landAlarm: true,
+    cashLimit: 1000000,
+    flight: null, // { arrive, to } of the current flight
+    landedAt: 0,
+    landings: [], // recent landing times, to spot mugs right after landing
+    alarmFor: 0,
     fab: null,
     // trip planner
     page: "plan", // plan | items
@@ -840,6 +848,7 @@
       extraPlushie: S.extraPlushie || ((me && me.cap && me.cap.extra.plushie) || 0),
       crowdShare: S.crowdShare,
       crowdWarn: S.crowdWarn,
+      cashLimit: S.cashLimit,
     };
   }
   const newTopic = () => "travelgeek-" + Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => "abcdefghijkmnpqrstuvwxyz23456789"[b % 32]).join("");
@@ -902,7 +911,8 @@
       </header>
       <div class="body"></div>
     </section>
-    <div class="toast" hidden></div>`;
+    <div class="toast" hidden></div>
+    <div class="guard" hidden></div>`;
   const $ = (sel) => root.querySelector(sel);
   const $$ = (sel) => [...root.querySelectorAll(sel)];
   const body = () => $(".body");
@@ -910,6 +920,7 @@
   const view = { name: "home", key: "", stack: [], loading: false, err: null };
   const isOpen = () => !$(".panel").hidden;
   function open() {
+    $(".guard").hidden = true;
     $(".panel").hidden = false;
     $(".scrim").hidden = false;
     render();
@@ -943,8 +954,8 @@
   function render() {
     $("[data-act=back]").hidden = view.name === "home";
     const it = view.name === "item" && findItem(view.key);
-    $(".title").textContent = { settings: "Settings", alerts: "Phone alerts", setup: "Your setup", money: "Money I can use", accuracy: "How accurate?" }[view.name] || (it ? it.name : "Travel Geek");
-    ({ home: renderHome, item: renderItem, settings: renderSettings, alerts: renderAlerts, setup: renderSetup, money: renderMoney, accuracy: renderAccuracy })[view.name]();
+    $(".title").textContent = { settings: "Settings", alerts: "Phone alerts", setup: "Your setup", money: "Money I can use", accuracy: "How accurate?", guard: "🛡 Cash Guard" }[view.name] || (it ? it.name : "Travel Geek");
+    ({ home: renderHome, item: renderItem, settings: renderSettings, alerts: renderAlerts, setup: renderSetup, money: renderMoney, accuracy: renderAccuracy, guard: renderGuard })[view.name]();
   }
   const findItem = (key) => data && data.items.find((i) => i.key === key);
 
@@ -966,6 +977,7 @@
     $("[data-act=refresh]").classList.remove("spinning");
     if (isOpen() && ["home", "item"].includes(view.name)) render();
     updateBadge();
+    guardTick();
   }
 
   // ---------------------------------------------------------------- home
@@ -986,6 +998,7 @@
       <div class="st-row"><b>${where}</b></div>
       <button class="st-row link2" data-act="setup">${cap.total} items · ${esc(METHOD_LABEL[m])}${cap.manual ? " (set by you)" : S.method === "auto" ? " (auto)" : ""} ✏️</button>
       <button class="st-row link2" data-act="alerts">${alerts} ›</button>
+      ${S.cashGuard && me && me.money && me.money.wallet >= (S.cashLimit || 0) && me.money.wallet ? `<button class="st-row link2" data-act="guard"><span class="r">💰 ${short(me.money.wallet)} on hand</span> · 🛡 Cash Guard ›</button>` : ""}
     </div>`;
   }
 
@@ -1634,6 +1647,7 @@
         <p class="muted small">Used to read your status, perks (to work out what you can carry) and travel. Stored on this device and sent to api.torn.com, and to the alert helper only if you turn phone alerts on.${PDA_KEY.includes("#") ? "" : " In Torn PDA your key is used automatically if this is empty."}</p>
         <button class="btn ghost" data-act="setup">Your setup: ${myCapacity().total} items · ${esc(METHOD_LABEL[myMethod()])} ›</button>
         <button class="btn ghost" data-act="alerts">Phone alerts: ${S.alertsOn ? "on" : "off"} ›</button>
+        <button class="btn ghost" data-act="guard">🛡 Cash Guard: ${S.cashGuard ? "on" : "off"} · who mugged me ›</button>
 
         <h3>Selling</h3>
         <label class="tog col"><span class="feerow"><b>Item Market sales fee</b><input class="num" data-n="fee" type="number" min="0" max="50" step="0.5" inputmode="decimal" value="${S.fee}"><b>%</b></span>
@@ -1782,6 +1796,14 @@
         return renderSettings();
       case "copy":
         return toast((await copyText(el.dataset.v)) ? `Copied ${money(+el.dataset.v)}` : "Couldn't copy", "ok", 1500);
+      case "guard":
+        mugLog = null;
+        return go("guard");
+      case "guardClose": {
+        guardHidden = $(".guard").dataset.key || "";
+        $(".guard").hidden = true;
+        return;
+      }
       case "copyDiag":
         return toast((await copyText(diagLines().join("\n") + `\nShown: ${myCapacity().total} items, ${METHOD_LABEL[myMethod()]}`)) ? "Copied. Paste it in the chat." : "Couldn't copy", "ok", 2500);
       case "copyTopic":
@@ -1966,6 +1988,210 @@
     }
   }
 
+  // ---------------------------------------------------------------- Cash Guard
+  // Muggers watch big bazaar sellers, see them flying (sales pile up as cash on hand, and nobody can bank in
+  // the air), work out the landing time and attack the moment they land. Cash Guard warns before you fly,
+  // sets landing alarms by itself, and says how much is on hand when you land. It never moves money for you.
+  const VAULT_URL = "https://www.torn.com/properties.php#/p=options&tab=vault";
+  const BANK_URL = "https://www.torn.com/bank.php";
+  const BAZAAR_URL = "https://www.torn.com/bazaar.php#/manage";
+  const walletNow = () => {
+    const page = walletOnPage();
+    return page != null ? page : me && me.money ? me.money.wallet || 0 : 0;
+  };
+  // PDA phone alarms 3 minutes and 1 minute before every landing, set automatically (no tap needed).
+  async function guardAlarms() {
+    if (!S.landAlarm || !canRemind()) return;
+    const loc = myLoc();
+    if (!loc || !["flying", "returning"].includes(loc.where) || !loc.arrive || loc.arrive <= nowS()) return;
+    if (S.alarmFor === loc.arrive) return;
+    const place = loc.where === "returning" ? "Torn" : (COUNTRIES[loc.cc] || {}).name || "abroad";
+    try {
+      for (const [id, before, label] of [[3001, 180, "in 3 minutes"], [3002, 60, "in 1 minute"]]) {
+        if (loc.arrive - before <= nowS() + 5) continue;
+        await window.flutter_inappwebview.callHandler("scheduleNotification", {
+          title: `🛬 Landing in ${place} ${label}`,
+          subtitle: "Cash Guard: deposit your cash as soon as you land. Travel Geek",
+          id,
+          timestamp: (loc.arrive - before) * 1000,
+          overwriteID: true,
+          launchNativeToast: false,
+          urlCallback: loc.where === "returning" ? VAULT_URL : TRAVEL_URL,
+        });
+      }
+      S.alarmFor = loc.arrive;
+      save();
+    } catch {}
+  }
+  // Remember the latest flight so we can tell "just landed" (and when, for the mug log).
+  function guardTrack() {
+    const loc = myLoc();
+    if (!loc) return;
+    if (["flying", "returning"].includes(loc.where) && loc.arrive) {
+      if (!S.flight || S.flight.arrive !== loc.arrive) (S.flight = { arrive: loc.arrive, to: loc.where === "returning" ? "torn" : loc.cc }), save();
+    } else if (S.flight) {
+      // Torn says we're no longer flying, so we've landed (trust that over the expected time).
+      const at = Math.min(nowS(), S.flight.arrive);
+      S.landings = [at, ...(S.landings || []).filter((x) => Math.abs(x - at) > 60)].slice(0, 30);
+      S.landedAt = at;
+      S.flight = null;
+      save();
+    }
+  }
+  let myBazaar = null; // { t, items, value }
+  async function loadMyBazaar() {
+    if (!apiKey() || (myBazaar && nowS() - myBazaar.t < 120)) return myBazaar;
+    try {
+      const d = await torn("/user/?selections=bazaar", 2 * MIN);
+      const list = Array.isArray(d.bazaar) ? d.bazaar : Object.values(d.bazaar || {});
+      const items = list.reduce((t, x) => t + +(x.quantity ?? x.amount ?? 1), 0);
+      const value = list.reduce((t, x) => t + +(x.quantity ?? x.amount ?? 1) * +(x.price ?? x.cost ?? 0), 0);
+      myBazaar = { t: nowS(), items, value };
+    } catch {
+      myBazaar = { t: nowS(), items: 0, value: 0, err: true };
+    }
+    return myBazaar;
+  }
+  const onTravelPage = () => /sid=travel/i.test(location.search) || /travelagency\.php/i.test(location.pathname);
+  const onVaultPage = () => /properties\.php/i.test(location.pathname) && /vault/i.test(location.hash);
+  let guardHidden = "";
+  async function guardBanner() {
+    const el = $(".guard");
+    // Hidden while the panel is open (the panel shows cash on hand too), so it never covers its buttons.
+    if (!S.cashGuard || !apiKey() || !me || isOpen() || onVaultPage() || /bank\.php/i.test(location.pathname)) return (el.hidden = true);
+    const loc = myLoc();
+    const cash = walletNow();
+    const limit = S.cashLimit || 0;
+    let html = "",
+      key = "";
+    if (loc && loc.where === "torn" && onTravelPage()) {
+      const bz = await loadMyBazaar();
+      const openBazaar = bz && bz.items > 0;
+      if (cash >= limit || openBazaar) {
+        key = `fly:${Math.round(cash / 1e5)}:${bz ? bz.items : 0}`;
+        html = `<div class="g-txt">⚠️ <b>Before you fly:</b> ${cash ? `${short(cash)} on hand` : ""}${cash && openBazaar ? " and " : ""}${openBazaar ? `${num(bz.items)} item${bz.items > 1 ? "s" : ""} in your bazaar (${short(bz.value)})` : ""}.<small>${openBazaar ? "Bazaar sales go to your cash on hand, and you can't bank in the air. Muggers watch for that and wait for your landing. " : ""}Deposit first${openBazaar ? " or close your bazaar" : ""}.</small></div>
+          <div class="g-btns"><a class="btn sm" href="${VAULT_URL}">Vault</a><a class="btn sm ghost" href="${BANK_URL}">Bank</a>${openBazaar ? `<a class="btn sm ghost" href="${BAZAAR_URL}">Bazaar</a>` : ""}<button class="ib sm" data-act="guardClose">✕</button></div>`;
+      }
+    } else if (loc && (loc.where === "torn" || loc.where === "abroad") && S.landedAt && nowS() - S.landedAt < 15 * 60 && cash >= limit && cash > 0) {
+      key = `landed:${S.landedAt}`;
+      html = `<div class="g-txt">🛬 <b>You landed with ${short(cash)} on hand.</b><small>${loc.where === "torn" ? "Deposit it now: muggers wait for landings." : "You're abroad: keep it safe until you're home."}</small></div>
+        <div class="g-btns">${loc.where === "torn" ? `<a class="btn sm" href="${VAULT_URL}">Vault</a><a class="btn sm ghost" href="${BANK_URL}">Bank</a>` : ""}<button class="ib sm" data-act="guardClose">✕</button></div>`;
+    } else if (loc && ["flying", "returning"].includes(loc.where) && cash >= limit && cash > 0) {
+      key = `air:${loc.arrive}:${Math.floor(Math.log2(Math.max(1, cash / Math.max(1, limit))))}`;
+      html = `<div class="g-txt">💰 <b>${short(cash)} on hand while flying.</b><small>You land ${loc.arrive ? `at ${clock(loc.arrive)} (${cdText(loc.arrive)})` : "soon"}. Be online and deposit straight away.</small></div><div class="g-btns"><button class="ib sm" data-act="guardClose">✕</button></div>`;
+    }
+    if (!html || key === guardHidden) return (el.hidden = true);
+    el.dataset.key = key;
+    el.innerHTML = html;
+    el.hidden = false;
+  }
+  // On the vault page: a Fill button that types your cash on hand into the deposit box. You press Deposit.
+  function guardVault() {
+    if (!S.cashGuard || !onVaultPage()) return;
+    document.querySelectorAll("input.input-money, input[name*='deposit' i], input[type='text'][class*='money']").forEach((inp) => {
+      const box = inp.closest("form") || inp.parentElement;
+      if (!box) return;
+      // Only the deposit box: its button (or the box itself) says Deposit, not Withdraw.
+      const btn = box.querySelector("button, input[type=submit]");
+      const label = ((btn && (btn.textContent || btn.value)) || box.textContent || "").toLowerCase();
+      if (!label.includes("deposit") || (btn && /withdraw/.test((btn.textContent || btn.value || "").toLowerCase()))) return;
+      if (box.querySelector(".tg-fill")) return;
+      const fb = document.createElement("button");
+      fb.type = "button";
+      fb.className = "torn-btn tg-fill";
+      fb.style.cssText = "margin-left:5px;padding:0 8px;height:30px;font-size:11px;background:#2f6f3a;color:#fff;border-radius:4px;";
+      fb.textContent = "Fill all cash";
+      fb.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const cash = walletNow();
+        if (!cash) return toast("No cash on hand", "bad");
+        typeInto(inp, cash);
+        toast(`Typed ${money(cash)}. Check it, then press Deposit yourself.`, "ok", 3000);
+      });
+      inp.insertAdjacentElement("afterend", fb);
+    });
+  }
+  async function guardTick() {
+    guardTrack();
+    guardAlarms();
+    guardVault();
+    await guardBanner();
+  }
+
+  // ---------------------------------------------------------------- mug log
+  // Who mugged you, when and for how much, from your attacks and events (Limited key).
+  let mugLog = null;
+  async function loadMugs(force) {
+    if (!apiKey()) return (mugLog = { err: "Needs your Torn API key." });
+    try {
+      const [a, ev] = await Promise.all([torn("/v2/user/attacks?limit=100&sort=DESC", 5 * MIN, force), torn("/user/?selections=events", 5 * MIN, force).catch(() => ({ events: {} }))]);
+      const myId = me && me.id;
+      const events = Object.values(ev.events || {}).filter((e) => /mugged you/i.test(e.event || ""));
+      const list = (a.attacks || [])
+        .filter((x) => x.defender && x.defender.id === myId && /mug/i.test(x.result || ""))
+        .map((x) => {
+          const evt = events.find((e) => Math.abs(e.timestamp - (x.ended || x.started)) < 300 && (!x.attacker || (e.event || "").includes(String(x.attacker.id)) || (e.event || "").includes(x.attacker.name)));
+          const amount = evt ? +(((evt.event || "").match(/\$([\d,]+)/) || [])[1] || "0").replace(/,/g, "") : 0;
+          const at = x.ended || x.started;
+          const landed = (S.landings || []).find((l) => at >= l && at - l < 600);
+          return { at, id: x.attacker && x.attacker.id, name: (x.attacker && x.attacker.name) || "Someone (stealthed)", amount, afterLanding: landed ? at - landed : null };
+        });
+      // Mugs found only in events (for example older than the attack list).
+      for (const e of events) {
+        if (list.some((m) => Math.abs(m.at - e.timestamp) < 300)) continue;
+        const id = +(((e.event || "").match(/XID=(\d+)/) || [])[1] || 0);
+        const name = ((e.event || "").match(/>([^<]+)<\/a>/) || [])[1] || "Someone";
+        const amount = +(((e.event || "").match(/\$([\d,]+)/) || [])[1] || "0").replace(/,/g, "");
+        const landed = (S.landings || []).find((l) => e.timestamp >= l && e.timestamp - l < 600);
+        list.push({ at: e.timestamp, id, name, amount, afterLanding: landed ? e.timestamp - landed : null });
+      }
+      list.sort((x, y) => y.at - x.at);
+      mugLog = { at: nowS(), list };
+    } catch (e) {
+      mugLog = { err: e.code === 16 ? "Your key can't read attacks. Use a Limited key." : e.message };
+    }
+    return mugLog;
+  }
+  function renderGuard() {
+    const cash = walletNow();
+    const m = mugLog;
+    body().innerHTML = `
+      <div class="form">
+        <div class="card"><div class="big ${cash >= (S.cashLimit || 0) && cash ? "r" : ""}">${short(cash)}</div><div class="small muted">cash on hand now${me && me.money && me.money.walletAt ? ` · checked ${ago(me.money.walletAt)} ago` : ""}</div></div>
+        <label class="tog"><input type="checkbox" data-s="cashGuard" ${S.cashGuard ? "checked" : ""}><span><b>Cash Guard</b><small class="muted">Warning before you fly with cash or a full bazaar, and a &ldquo;landed with $X&rdquo; banner.</small></span></label>
+        <label class="tog"><input type="checkbox" data-s="landAlarm" ${S.landAlarm ? "checked" : ""}><span><b>Landing alarms on this phone</b><small class="muted">Torn PDA reminds you 3 minutes and 1 minute before every landing, set by itself.</small></span></label>
+        <label class="tog">Warn me when cash on hand is over<input class="num wide" data-m="cashLimit" inputmode="decimal" value="${short(S.cashLimit).slice(1)}"></label>
+        <p class="muted small">With phone alerts on (⚙ → Phone alerts), the helper also sends landing alarms and &ldquo;bazaar sold while you're flying&rdquo; alerts even when Torn PDA is closed.</p>
+        <h3>Who mugged me</h3>
+        ${
+          !m
+            ? `<div class="spin"></div>`
+            : m.err
+              ? `<p class="err small">${esc(m.err)}</p>`
+              : m.list.length
+                ? `<div class="list">${m.list
+                    .slice(0, 25)
+                    .map(
+                      (x) => `<div class="row"><span class="nm">${x.id ? `<a href="https://www.torn.com/profiles.php?XID=${x.id}">${esc(x.name)}</a>` : esc(x.name)}<small>${new Date(x.at * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}${x.afterLanding != null ? ` · <span class="r">${x.afterLanding < 90 ? x.afterLanding + " seconds" : dur(x.afterLanding)} after you landed</span>` : ""}</small></span><span class="rt"><b class="r">${x.amount ? "-" + short(x.amount) : "—"}</b></span></div>`
+                    )
+                    .join("")}</div><p class="muted small">Open a profile and tap 👁 in Torn Watch Geek to see when they're online.</p>`
+                : `<p class="muted small">No mugs in your recent attacks. 🎉</p>`
+        }
+      </div>`;
+    if (!m) loadMugs().then(() => view.name === "guard" && renderGuard());
+    $$("[data-s]").forEach((el) => el.addEventListener("change", () => ((S[el.dataset.s] = el.checked), save(), guardTick())));
+    $$("[data-m]").forEach((el) =>
+      el.addEventListener("change", () => {
+        S.cashLimit = parseMoney(el.value);
+        save();
+        syncSoon();
+        toast(`Saved: ${short(S.cashLimit)}`);
+        guardTick();
+      })
+    );
+  }
+
   // ---------------------------------------------------------------- draggable button
   let fabDragged = false;
   function placeFab() {
@@ -2037,6 +2263,13 @@
       refresh(false);
     }, 2 * MIN);
     setInterval(tickCountdowns, 1000);
+    guardTick();
+    setInterval(guardTick, 5000);
+    // Close to landing, check cash on hand and status more often.
+    setInterval(() => {
+      const loc = myLoc();
+      if (loc && ["flying", "returning"].includes(loc.where) && loc.arrive && loc.arrive - nowS() < 300 && loc.arrive - nowS() > -600 && !document.hidden) loadMe(true).then(guardTick);
+    }, 30 * 1000);
     setInterval(() => {
       try {
         if (document.querySelector('div[class*="stockTableWrapper"]')) shopTick();
@@ -2154,6 +2387,13 @@ input[type=checkbox] { width: 20px; height: 20px; flex: none; padding: 0; }
 .toast.ok { color: var(--g); border-color: var(--g); }
 .toast.bad { color: var(--r); border-color: var(--r); }
 .sorts.nav { margin: 10px 0 0; }
+.guard { position: fixed; left: 8px; right: 8px; top: 8px; z-index: 2147483004; background: var(--bg); color: var(--text); border: 2px solid var(--r);
+  border-radius: 14px; padding: 10px 12px; box-shadow: 0 8px 24px rgba(0,0,0,.5); font-size: 14px; display: flex; flex-direction: column; gap: 8px; }
+@media (min-width: 760px) { .guard { left: auto; width: 420px; } }
+.guard small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.g-btns { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.g-btns .ib.sm { margin-left: auto; min-width: 30px; height: 30px; font-size: 14px; }
+.g-btns .btn { margin: 0; }
 .controls { margin-top: 10px; gap: 8px; }
 .ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ctl > span:first-child { flex: 0 0 120px; color: var(--muted); font-size: 12px; }

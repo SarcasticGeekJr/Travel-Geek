@@ -353,3 +353,36 @@ test("crowd text is added to leave alerts for players who asked for it", () => {
   r = decideAlerts({ items, st: ME, loc: { where: "torn" }, sent: {}, now: leaveAt, crowd, selfH: "me" });
   assert.doesNotMatch(r.alerts[0].message, /other Travel Geek/);
 });
+
+// ------------------------------------------------------------ Cash Guard
+test("landing alarms 3 minutes and 1 minute before landing, with cash on hand", () => {
+  const loc = { where: "returning", arriveAt: T0 + 200 };
+  let r = decideAlerts({ items: [], st: ME, loc, sent: {}, now: T0, cash: 12.4e6 });
+  const land = r.alerts.find((a) => a.type === "land");
+  assert.match(land.title, /Landing in Torn in ~3 min · \$12\.4m on hand/);
+  assert.match(land.message, /Deposit it the moment you land/);
+  r = decideAlerts({ items: [], st: ME, loc, sent: {}, now: T0 + 150, cash: 200000 });
+  assert.match(r.alerts.find((a) => a.type === "land").title, /about a minute · \$200k on hand/);
+  assert.equal(r.alerts.filter((a) => a.type === "cash").length, 0, "under the limit: no cash alert");
+});
+
+test("cash alert while flying, again when it doubles, and after landing", () => {
+  const loc = { where: "flying", cc: "jap", arriveAt: T0 + 3600 };
+  let r = decideAlerts({ items: [], st: ME, loc, sent: {}, now: T0, cash: 3e6 });
+  const c = r.alerts.find((a) => a.type === "cash");
+  assert.match(c.title, /\$3m on hand while you're flying/);
+  assert.match(c.message, /You land in Japan/);
+  const sent = { [c.key]: T0 };
+  assert.equal(decideAlerts({ items: [], st: ME, loc, sent, now: T0 + 60, cash: 3.5e6 }).alerts.filter((a) => a.type === "cash").length, 0);
+  assert.equal(decideAlerts({ items: [], st: ME, loc, sent, now: T0 + 60, cash: 8e6 }).alerts.filter((a) => a.type === "cash").length, 1, "doubled");
+  r = decideAlerts({ items: [], st: ME, loc: { where: "torn" }, prevLoc: { where: "returning", arriveAt: T0 }, sent: {}, now: T0 + 30, cash: 8e6 });
+  assert.match(r.alerts[0].title, /You landed with \$8m on hand/);
+});
+
+test("Cash Guard alerts ignore the hourly limit but respect quiet hours and switches", () => {
+  const loc = { where: "returning", arriveAt: T0 + 200 };
+  const full = Object.fromEntries([...Array(10)].map((_, i) => ["x" + i, T0 - 100]));
+  assert.ok(decideAlerts({ items: [], st: ME, loc, sent: full, now: T0, cash: 5e6 }).alerts.length >= 1);
+  assert.equal(decideAlerts({ items: [], st: { ...ME, quiet: { on: true, from: 0, to: 1439 } }, loc, sent: {}, now: T0, cash: 5e6 }).alerts.length, 0);
+  assert.equal(decideAlerts({ items: [], st: { ...ME, types: { land: false, cash: false } }, loc, sent: {}, now: T0, cash: 5e6 }).alerts.length, 0);
+});

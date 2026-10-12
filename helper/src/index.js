@@ -7,7 +7,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { COUNTRIES, buildItems, observe, location, decideAlerts, pruneSent, cleanSettings, cleanPlan, countryCode, crowdEntries, crowdHash } from "./core.js";
 
-const VERSION = "1.2.1";
+const VERSION = "1.3.0";
 const PRICES_EVERY = 10 * 60; // seconds
 const TYPES_EVERY = 24 * 3600;
 const MAX_USERS = 40; // keeps a tick under the free plan's 50 outgoing requests
@@ -200,11 +200,14 @@ export class Hub extends DurableObject {
     report.users++;
     let d;
     try {
-      try {
-        d = await this.torn("/user/?selections=basic,travel", u.key);
-      } catch (e) {
-        if (e.code !== 16) throw e;
-        d = await this.torn("/user/?selections=basic", u.key); // a Public key can't read travel; status is enough
+      // Money (cash on hand) needs a Limited key; travel needs more than Public. Fall back step by step.
+      for (const sel of ["basic,travel,money", "basic,travel", "basic"]) {
+        try {
+          d = await this.torn("/user/?selections=" + sel, u.key);
+          break;
+        } catch (e) {
+          if (e.code !== 16 || sel === "basic") throw e;
+        }
       }
       u.err = null;
       u.errs = 0;
@@ -220,9 +223,11 @@ export class Hub extends DurableObject {
       return;
     }
     const loc = location(d, t);
+    const prevLoc = u.loc;
     u.loc = { ...loc, at: t };
+    const cash = d.money_onhand ?? (d.money && d.money.wallet) ?? null;
     const sent = pruneSent(u.sent, t);
-    const { alerts, suppressed } = decideAlerts({ items, st: u.settings, loc, sent, now: t, plan: u.plan, crowd, selfH: crowdHash(u.id, t) });
+    const { alerts, suppressed } = decideAlerts({ items, st: u.settings, loc, sent, now: t, plan: u.plan, crowd, selfH: crowdHash(u.id, t), cash, prevLoc });
     for (const k of suppressed) sent[k] = t;
     for (const a of alerts) {
       try {

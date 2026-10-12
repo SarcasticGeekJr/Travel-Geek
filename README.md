@@ -41,6 +41,17 @@ Tells you which trips to make, in order, for the most profit in the time you hav
 - **In the foreign shop:** a **Fill** button next to Buy types the right amount into the box (your plan's amount, limited by room, stock and cash). You still press Buy yourself. Items in your plan get a green outline. The shop also tells Travel Geek your exact capacity.
 - **How accurate?** Every restock the helper sees is checked against what it predicted. Each item shows its hit rate ("7 of 9 within 10 min") and which method works best for it (recent restocks, all restocks, last 3, or same time of day).
 
+## 🛡 Cash Guard (against muggers)
+
+Muggers watch big bazaar sellers. When you fly, bazaar sales pile up as cash on hand (you can't bank in the air), they work out your landing time and attack the moment you land. Cash Guard helps you not be that target:
+
+- **Before you fly:** on the travel page, a red warning if you have cash on hand or items in your bazaar, with buttons to your Vault, Bank and Bazaar.
+- **Landing alarms, automatic:** Torn PDA reminds you 1–3 minutes before every landing. With phone alerts on, the helper also alerts you 3 minutes and 1 minute before landing even when Torn PDA is closed, with how much cash you're carrying.
+- **"💰 $X on hand while you're flying":** an alert when bazaar sales push your cash on hand over your limit (default $1m), and again each time it doubles.
+- **"🛬 You landed with $X on hand":** a banner (and an alert) right after landing, with a button to your vault. On the vault page, **Fill all cash** types the amount into the deposit box. You still press Deposit.
+- **Who mugged me:** from your attacks and events (Limited key): who, when, how much, and whether it was right after you landed.
+- Turn parts on or off in ⚙ → 🛡 Cash Guard. It never deposits, closes your bazaar or clicks anything for you.
+
 ## Phone alerts (ntfy)
 
 A small helper runs in the cloud every minute, day and night. It watches stock, learns restock patterns, checks where you are and sends alerts to the free **ntfy** app:
@@ -67,6 +78,8 @@ When phone alerts are on, your key is stored on the helper and used about once a
 | Status, travel | Helper (only while alerts are on) | No | Time alerts to where you are | Limited (Public works with less detail) |
 | Perks | This device only | No | Work out what you can carry | Limited |
 | Money (wallet, vault, networth, faction balance) | This device only | No | Plan within the money you can use | Limited |
+| Cash on hand (while alerts are on) | Helper | No | Cash Guard alerts while flying and landing | Limited |
+| Your bazaar, attacks and events | This device only | No | Cash Guard warning and mug log | Limited |
 | Shop stock you see abroad | Helper (stock only) | Feeds everyone's predictions | Exact restock times | Your key is used once to check you're in that country |
 | Country and landing time of your trips (only if you turn on sharing) | Helper | Yes, without your name | Crowd warning for others | — |
 
