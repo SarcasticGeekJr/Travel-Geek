@@ -52,6 +52,7 @@ export class Hub extends DurableObject {
     const u = new URL(req.url);
     try {
       if (u.pathname === "/tick" && req.method === "POST") return json(await this.tick());
+      if (u.pathname === "/api/history" && req.method === "GET") return json(await this.history(), 200, { "Cache-Control": "public, max-age=300" });
       if (u.pathname === "/api/state" && req.method === "GET") return json(await this.state(), 200, { "Cache-Control": "public, max-age=30" });
       if (u.pathname === "/api/user" && req.method === "POST") return json(await this.upsertUser(await req.json()));
       if (u.pathname === "/api/user" && req.method === "DELETE") return json(await this.deleteUser(await req.json()));
@@ -87,6 +88,17 @@ export class Hub extends DurableObject {
     const users = (await this.ctx.storage.get("users")) || {};
     const crowd = crowdEntries(Object.values(users), t);
     return { version: VERSION, now: t, report: report || null, tickAt: (meta && meta.tickAt) || 0, source: (meta && meta.source) || "", pricesAt: (prices && prices.at) || 0, updates, items, crowd };
+  }
+
+  // Restock history per item (shop stock only, nothing about players), for checking how well predictions work.
+  async history() {
+    const countries = await this.countries();
+    const items = [];
+    for (const [cc, c] of Object.entries(countries))
+      for (const [id, it] of Object.entries(c.items || {}))
+        if ((it.cycles && it.cycles.length) || (it.amts && it.amts.length))
+          items.push({ key: `${cc}:${id}`, name: it.name, cycles: it.cycles || [], starts: it.starts || [], amts: it.amts || [], errs: it.errs || [], rate: it.rate || 0, qty: it.qty, emptySince: it.emptySince || null, lastRestock: it.lastRestock || null });
+    return { version: VERSION, now: now(), items };
   }
 
   async readStocks() {

@@ -46,6 +46,9 @@ jobs:
           print("factionbalance in selection names:", "factionbalance" in names, "| money:", '"money"' in names)
           PY
           for u in "v2/user/factionbalance" "v2/user/?selections=factionbalance" "v2/user/money" "user/?selections=money"; do echo "$u -> $(curl -sS -m 20 "https://api.torn.com/$u$( [[ $u == *\?* ]] && echo '&' || echo '?')key=AAAAAAAAAAAAAAAA")"; done
+      - name: Restock history (for testing prediction methods)
+        run: |
+          curl -sS -m 30 "https://travel-geek.sakthiramkumar12.workers.dev/api/history" | python3 -c "import json,sys; d=json.load(sys.stdin); print('HISTORY-JSON', json.dumps(d, separators=(',', ':')))" || true
       - name: Full state (for replaying the planner)
         run: |
           curl -sS -m 30 "https://travel-geek.sakthiramkumar12.workers.dev/api/state" | python3 -c "import json,sys; d=json.load(sys.stdin); print('STATE-JSON', json.dumps({'now': d.get('tickAt'), 'items': d.get('items', [])}, separators=(',', ':')))"
