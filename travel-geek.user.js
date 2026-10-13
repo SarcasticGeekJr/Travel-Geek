@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.4.2
+// @version      1.4.3
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -34,7 +34,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.4.2"; // keep in sync with @version above
+  const VERSION = "1.4.3"; // keep in sync with @version above
   // Only one copy runs per page. If another copy got here first (usually an old one that was pasted in or
   // installed twice), say so, because otherwise updates seem to do nothing.
   if (window.__travelGeekLoaded) {
@@ -582,6 +582,9 @@
   // expected profit in a time window, within the money you can use and the slots you can carry.
   const PLAN = (() => {
     const SHOP_TIME = 120; // seconds spent buying before flying home
+    // How many one restock brings. The helper sees a restock some time after it lands, when people may
+    // have bought some already, so the largest recent one is closer to the truth than the middle one.
+    const restockSize = (it) => it.amtMax || Math.max(it.amtTypical || 0, it.amt || 0);
     const FRESH = 45 * 60;
     const BEAM = 30;
     // Standard ticket prices (Torn wiki). Airstrip and the WLT jet fly free; Business uses a ticket.
@@ -594,7 +597,7 @@
       const perSec = (it.rate || 0) / 3600;
       const pr = it.pred;
       const emptyFor = it.emptyAvg || (pr && pr.avg) || 0;
-      const size = it.amtTypical || it.amt || 0;
+      const size = restockSize(it);
       const sure = pr && pr.pct ? pr.pct / 100 : it.emptyN >= 3 ? 0.5 : 0.3;
       const window = pr && pr.to && pr.at ? Math.max(300, pr.to - pr.at) : 900;
       let first = 0;
@@ -617,7 +620,7 @@
         if (left >= 1) return { avail: Math.floor(left), p: stale ? 0.6 : 0.95 };
       } else {
         const pr = it.pred;
-        if (pr && pr.overdue) return { avail: it.amtTypical || it.amt || 100, p: 0.2 };
+        if (pr && pr.overdue) return { avail: restockSize(it) || 100, p: 0.2 };
       }
       const c = cycleOf(it, now);
       if (!c) return { avail: 0, p: 0 };
@@ -821,7 +824,7 @@
       });
     }
 
-    return { make, cashSteps, availability, mix, TICKET };
+    return { make, cashSteps, availability, mix, restockSize, TICKET };
   })();
   // ==/planner==
 
@@ -848,12 +851,14 @@
   // Your numbers for one item.
   function personal(it) {
     const cap = myCapacity().total + extraFor(it.type);
-    const units = it.qty > 0 ? Math.min(cap, it.qty) : cap;
+    // Sold out: you can only buy what one restock brings (some bring just a handful).
+    const restock = PLAN.restockSize(it);
+    const units = it.qty > 0 ? Math.min(cap, it.qty) : restock > 0 ? Math.min(cap, restock) : cap;
     const net = Math.floor(it.sell * (1 - (+S.fee || 0) / 100));
     const unit = it.sell ? net - it.cost : 0;
     const flight = flightSec(it.cc);
     const trip = unit * units;
-    return { cap, units, net, unit, trip, perHour: flight ? Math.round(trip / ((2 * flight) / 3600)) : 0, cash: units * it.cost, flight };
+    return { cap, units, restock: it.qty > 0 ? 0 : restock, net, unit, trip, perHour: flight ? Math.round(trip / ((2 * flight) / 3600)) : 0, cash: units * it.cost, flight };
   }
 
   // What to do about one item: { kind, text, leaveAt?, land? }.
@@ -874,8 +879,23 @@
     const land = pr.at - 120;
     const leaveAt = land - fl;
     if (leaveAt <= t) {
-      if (t + fl < pr.to) return { kind: "go", text: `Leave now → land ${clock(t + fl)}. Restock expected ~${clock(pr.at)}.`, land: t + fl };
-      return { kind: "late", text: `Too late for this restock (expected ~${clock(pr.at)}).` };
+      // Landing after the restock only works if the stock lasts that long. A big restock lasts hours;
+      // a restock of 3 selling ~100 an hour is gone in about 2 minutes.
+      const size = PLAN.restockSize(it);
+      const sellOut = it.rate > 0 && size ? (size / it.rate) * 3600 : Infinity;
+      const lasts = pr.at + Math.max(sellOut, 10 * 60);
+      if (t + fl < pr.to && t + fl <= lasts) return { kind: "go", text: `Leave now → land ${clock(t + fl)}. Restock expected ~${clock(pr.at)}.`, land: t + fl };
+      const why = isFinite(sellOut) ? ` A restock brings ~${num(size)} and they sell out in about ${dur(Math.max(60, sellOut))}.` : "";
+      // The restock after that: sell-out time plus how long it usually stays empty. Less sure, so said as a guess.
+      const empty = it.emptyAvg || pr.avg || 0;
+      if (isFinite(sellOut) && empty) {
+        const next = pr.at + sellOut + empty;
+        const nLand = next - 120,
+          nLeave = nLand - fl;
+        if (nLeave > t)
+          return { kind: "wait", text: `Too late for the restock ~${clock(pr.at)}: you'd land ${clock(t + fl)}.${why} Next one is a guess, ~${clock(next)}: leave at ${clock(nLeave)} (in ${dur(nLeave - t)}) → land ${clock(nLand)}.`, leaveAt: nLeave, land: nLand };
+      }
+      return { kind: "late", text: `Too late for this restock (expected ~${clock(pr.at)}).${why}` };
     }
     return { kind: "wait", text: `Leave at ${clock(leaveAt)} (in ${dur(leaveAt - t)}) → land ${clock(land + 0)} for the restock ~${clock(pr.at)}.`, leaveAt, land };
   }
@@ -1279,7 +1299,7 @@
     if (!n) return "";
     const tight = g.buys.some((b) => {
       const it = findItem(b.key);
-      const size = it ? (it.qty > 0 ? it.qty : it.amtTypical || it.amt || 0) : 0;
+      const size = it ? (it.qty > 0 ? it.qty : PLAN.restockSize(it)) : 0;
       return size && size < (n + 1) * b.units;
     });
     return `<div class="a small">⚠️ ${n} other Travel Geek player${n > 1 ? "s" : ""} land in ${esc(COUNTRIES[g.cc].name)} within 10 min of you.${tight ? " There may not be enough stock for everyone." : ""}</div>`;
@@ -1487,7 +1507,7 @@
         <div class="stat"><span>Buy abroad</span><b>${money(it.cost)}</b>${cheap}</div>
         <div class="stat"><span>Sell here</span><b>${it.sell ? money(it.sell) : "—"}</b><small>MV ${short(it.mv || null)} · bazaar ${short(it.low || null)}${it.bz ? ` · in ${num(it.bz)} bazaars` : ""}</small></div>
         <div class="stat"><span>Profit per item</span><b class="${p.unit > 0 ? "g" : "r"}">${money(p.unit)}</b><small>after ${+S.fee || 0}% fee</small></div>
-        <div class="stat"><span>Profit per trip</span><b class="${p.trip > 0 ? "g" : "r"}">${short(p.trip)}</b><small>${p.units} items${p.units < p.cap ? ` (only ${num(it.qty)} left)` : ""}</small></div>
+        <div class="stat"><span>Profit per trip</span><b class="${p.trip > 0 ? "g" : "r"}">${short(p.trip)}</b><small>${p.units} items${p.units < p.cap ? (p.restock ? ` (a restock brings ~${num(p.restock)})` : ` (only ${num(it.qty)} left)`) : ""}</small></div>
         <div class="stat"><span>Per hour of flying</span><b>${short(p.perHour)}</b><small>${dur(2 * p.flight)} round trip</small></div>
         <div class="stat"><span>Cash to take</span><b>${short(p.cash)}</b><button class="mini" data-act="copy" data-v="${p.cash}">copy</button></div>
       </div>
