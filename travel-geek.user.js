@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.4.1
+// @version      1.4.2
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -34,7 +34,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.4.1"; // keep in sync with @version above
+  const VERSION = "1.4.2"; // keep in sync with @version above
   // Only one copy runs per page. If another copy got here first (usually an old one that was pasted in or
   // installed twice), say so, because otherwise updates seem to do nothing.
   if (window.__travelGeekLoaded) {
@@ -377,6 +377,9 @@
           walletAt: d.money_onhand != null ? nowS() : me && me.money && me.money.walletAt,
         }),
       };
+      // Your faction balance comes with the money selection too ("faction": { money, points }).
+      const fb = d.faction && typeof d.faction === "object" && !("faction_id" in d.faction) ? d.faction : null;
+      if (fb && fb.money != null) Object.assign(me.money, { faction: +fb.money || 0, factionOk: true, factionErr: "", factionAt: nowS() });
       store.set("me", me);
       syncSoon(); // capacity or ticket may have changed
     } catch (e) {
@@ -396,13 +399,23 @@
     } catch (e) {
       m.nwErr = e.message;
     }
-    try {
-      const f = await torn("/v2/user/factionbalance", 4 * MIN, force);
-      const b = f.factionBalance || f.balance || f.faction_balance || {};
-      m.faction = +(b.money ?? 0);
-      m.factionOk = true;
-    } catch (e) {
-      m.factionErr = e.message;
+    // Faction balance: read with your money (see loadMe). Only ask separately if that didn't have it.
+    if (!(m.factionAt && nowS() - m.factionAt < 600)) {
+      let err = "";
+      for (const path of ["/v2/user/factionbalance", "/v2/user/?selections=factionbalance"]) {
+        try {
+          const f = await torn(path, 4 * MIN, force);
+          const b = f.factionBalance || f.balance || f.faction_balance;
+          if (b === null) Object.assign(m, { faction: 0, factionOk: true, factionErr: "" }); // not in a faction
+          else if (b && b.money != null) Object.assign(m, { faction: +b.money || 0, factionOk: true, factionErr: "" });
+          else continue;
+          err = "";
+          break;
+        } catch (e) {
+          err = err || e.message;
+        }
+      }
+      if (err) m.factionErr = err;
     }
     m.otherAt = nowS();
     me.money = m;
