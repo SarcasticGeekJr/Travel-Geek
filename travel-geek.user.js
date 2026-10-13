@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.4.3
+// @version      1.4.4
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -34,7 +34,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.4.3"; // keep in sync with @version above
+  const VERSION = "1.4.4"; // keep in sync with @version above
   // Only one copy runs per page. If another copy got here first (usually an old one that was pasted in or
   // installed twice), say so, because otherwise updates seem to do nothing.
   if (window.__travelGeekLoaded) {
@@ -402,10 +402,13 @@
     // Faction balance: read with your money (see loadMe). Only ask separately if that didn't have it.
     if (!(m.factionAt && nowS() - m.factionAt < 600)) {
       let err = "";
-      for (const path of ["/v2/user/factionbalance", "/v2/user/?selections=factionbalance"]) {
+      // Torn API 6.13+: /v2/user/money has { money: { wallet, vault, points, faction, ... } }.
+      // Older keys/servers: /v2/user/factionbalance. Accept a number or { money } either way.
+      for (const path of ["/v2/user/money", "/v2/user/factionbalance", "/v2/user/?selections=factionbalance"]) {
         try {
           const f = await torn(path, 4 * MIN, force);
-          const b = f.factionBalance || f.balance || f.faction_balance;
+          const fm = f.money && typeof f.money === "object" ? f.money.faction : undefined;
+          const b = fm !== undefined ? (typeof fm === "number" ? { money: fm } : fm) : f.factionBalance || f.balance || f.faction_balance;
           if (b === null) Object.assign(m, { faction: 0, factionOk: true, factionErr: "" }); // not in a faction
           else if (b && b.money != null) Object.assign(m, { faction: +b.money || 0, factionOk: true, factionErr: "" });
           else continue;
