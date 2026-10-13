@@ -25,6 +25,9 @@ jobs:
           for i in sorted(items, key=lambda i: -((i.get("sell") or 0) - i.get("cost", 0)))[:15]:
               print(f'{i["key"]:9} {i["name"][:22]:22} qty {i["qty"]:>6} cost {i["cost"]:>9} sell {i.get("sell", 0):>9} {i.get("type", "")} ({i.get("speed")}) pred {i.get("pred")}')
           PY
+      - name: Full state (for replaying the planner)
+        run: |
+          curl -sS -m 30 "https://travel-geek.sakthiramkumar12.workers.dev/api/state" | python3 -c "import json,sys; d=json.load(sys.stdin); print('STATE-JSON', json.dumps({'now': d.get('tickAt'), 'items': d.get('items', [])}, separators=(',', ':')))"
       - name: How many bazaars sell each travel item
         run: |
           curl -sS -m 30 https://weav3r.dev/api/marketplace -o w3b.json
