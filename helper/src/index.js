@@ -51,6 +51,7 @@ export class Hub extends DurableObject {
   async fetch(req) {
     const u = new URL(req.url);
     try {
+      this.ctx.waitUntil(this.ensureAlarm());
       if (u.pathname === "/tick" && req.method === "POST") return json(await this.tick());
       if (u.pathname === "/api/history" && req.method === "GET") return json(await this.history(), 200, { "Cache-Control": "public, max-age=300" });
       if (u.pathname === "/api/state" && req.method === "GET") return json(await this.state(), 200, { "Cache-Control": "public, max-age=30" });
@@ -121,8 +122,34 @@ export class Hub extends DurableObject {
     return { stocks: out, source: [ys && "YATA", ps && "Prometheus"].filter(Boolean).join("+") };
   }
 
+  // Backup timer: the Durable Object wakes itself every minute, so the helper keeps running even when
+  // Cloudflare's cron stops firing (it did on 13 Oct 2026 for over an hour). Cron and alarm share tick(),
+  // which skips a run if another one finished less than 40 seconds ago.
+  async alarm() {
+    try {
+      await this.tick();
+    } finally {
+      await this.ctx.storage.setAlarm(Date.now() + 60 * 1000);
+    }
+  }
+  async ensureAlarm() {
+    if ((await this.ctx.storage.getAlarm()) == null) await this.ctx.storage.setAlarm(Date.now() + 5 * 1000);
+  }
+
   async tick() {
     const t = now();
+    const last = await this.ctx.storage.get("meta");
+    if (last && last.tickAt && t - last.tickAt < 40) return { skipped: true };
+    if (this.ticking && t - this.ticking < 120) return { skipped: true, busy: true };
+    this.ticking = t;
+    try {
+      return await this.tickNow(t);
+    } finally {
+      this.ticking = 0;
+    }
+  }
+
+  async tickNow(t) {
     const report = { at: t, countries: 0, users: 0, sent: 0, errors: [] };
     let countries = await this.countries();
 
