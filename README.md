@@ -20,11 +20,11 @@ Tells you which trips to make, in order, for the most profit in the time you hav
 
 - **Round trips only** (Torn → country → Torn), timed to **land at a restock**. It never plans for you to wait abroad.
 - **Start:** now, or a time you pick. If you're abroad, flying or in hospital, it starts when you're back.
-- **Play for:** 4 hours by default, or 1–8 hours, or until a time you choose.
+- **Play for:** 4 hours by default, or 1–12 hours, a whole day (24 hours), or until a time you choose. Far countries (Japan, China, UAE, South Africa) take 5–6.6 hours there and back, so they only show up in plans of 6 hours or more.
 - **Money I can use:** your wallet, vault, stocks and faction balance (points optional), read from the Torn API. Untick any of them, set a "don't spend more than", or type your own number. Plans only buy what you can afford, and each trip says where to get the cash first ("get $7.3m: Vault $6.1m, Faction $1.2m"). It never moves money for you.
 - **Between trips:** "Don't sell" (pay for every trip from today's money) or "Sell" (profits pay for the next trip).
 - **Business tickets I have:** 0 by default. Enter how many you have and it uses one only on a trip where the extra profit beats the ticket's price.
-- **Expected vs best case:** "best case" assumes every restock arrives as predicted; "expected" counts how often predictions have really been right. Plans are ranked by expected profit.
+- **Expected vs best case:** "best case" assumes every restock arrives as predicted; "expected" counts how often predictions have really been right, and how much of the day each shop is stocked (big shops that take hours to sell out are almost always stocked, even far ahead). Plans are ranked by expected profit.
 - **Live:** countdowns tick every second and the plan is recalculated every minute. If the best plan changes, it says why.
 - **⏰ Remind me for each trip** (Torn PDA) and **🔔 Follow this plan** (a phone alert before each departure).
 - **"With $X you'd make +$Y more"** when more money would help.

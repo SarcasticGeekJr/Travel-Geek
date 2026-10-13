@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.3.1
+// @version      1.4.0
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -39,7 +39,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.3.1"; // keep in sync with @version above
+  const VERSION = "1.4.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.user.js";
   const DEFAULT_HELPER = "https://travel-geek.sakthiramkumar12.workers.dev";
   const YATA = "https://yata.yt/api/v1/travel/export/";
@@ -601,12 +601,22 @@
       if (c.cycle && a > c.first + c.cycle) k = Math.floor((a - c.first) / c.cycle);
       const r = c.first + k * c.cycle;
       const spread = c.window * (1 + k); // later restocks are less certain
-      if (a < r - spread) return { avail: 0, p: 0 };
+      // Projected to be empty when we land. For shops that are stocked most of the time that projection
+      // is too unsure to rule them out, so count about half a restock at a lower chance.
+      if (a < r - spread) return share(c) > 0.5 ? { avail: Math.floor(c.size / 2), p: share(c) * 0.8 } : { avail: 0, p: 0 };
       const frac = Math.min(1, (a - (r - spread)) / (2 * spread));
       const sold = c.perSec * Math.max(0, a - r);
       const avail = c.size ? Math.floor(c.size - sold) : 999; // unknown size: assume enough
       if (avail < 1) return { avail: 0, p: 0 };
-      return { avail, p: c.sure * Math.pow(0.8, k) * (0.15 + 0.85 * frac) };
+      return { avail, p: Math.max(share(c), c.sure * Math.pow(0.8, k) * (0.15 + 0.85 * frac)) };
+    }
+    // How sure we can be that a shop has the item at a random moment: the part of each cycle it is in stock.
+    // Big shops that take hours to sell out are almost always stocked; a restock of 3 that sells out in
+    // two minutes almost never is. Capped at 90%, since the cycle itself is an estimate.
+    function share(c) {
+      const sellOut = c.perSec && c.size ? c.size / c.perSec : 0;
+      const empty = c.cycle ? c.cycle - sellOut : 0;
+      return sellOut && empty > 0 ? (0.9 * sellOut) / (sellOut + empty) : 0;
     }
 
     // Best mix to buy in one country: fills the carrying slots, within the budget.
@@ -647,15 +657,18 @@
       const back = land + SHOP_TIME + fl;
       const cands = [];
       for (const it of ctx.byCountry[cc] || []) {
-        // The same item again only after its shop has had time to sell out and restock.
-        if (used.has(it.key)) {
-          const c = cycleOf(it, ctx.now);
-          if (!c || !c.cycle || land < used.get(it.key) + c.cycle * 0.9) continue;
-        }
         const unit = Math.floor(it.sell * (1 - ctx.fee / 100)) - it.cost;
         if (!(unit > 0) || !it.cost) continue;
         const { avail, p } = availability(it, land, ctx.now);
         if (avail <= 0 || p <= 0) continue;
+        // The same item again: fine when the shop has plenty (our last buy hardly dented it),
+        // otherwise only after the shop has had time to sell out and restock.
+        if (used.has(it.key)) {
+          const c = cycleOf(it, ctx.now);
+          const cycled = c && c.cycle && land >= used.get(it.key) + c.cycle * 0.9;
+          const plenty = avail >= 200 || (c && share(c) > 0.5);
+          if (!cycled && !plenty) continue;
+        }
         cands.push({ it, unit, avail, p });
       }
       if (!cands.length) return null;
@@ -702,7 +715,7 @@
     function search(ctx, start, end, money, tickets, sellMode) {
       let beam = [{ t: start, money, tickets, used: new Map(), legs: [], best: 0, exp: 0 }];
       const done = [];
-      for (let depth = 0; depth < 12 && beam.length; depth++) {
+      for (let depth = 0; depth < 16 && beam.length; depth++) {
         const next = [];
         for (const st of beam) {
           done.push(st);
@@ -1213,7 +1226,10 @@
     const c = COUNTRIES[g.cc];
     const lines = g.buys
       .map((b) => {
-        const when = b.qty > 0 ? `in stock (${num(b.qty)})` : b.pred && b.pred.at ? `restock ~${clock(b.pred.at)}` : "restock expected";
+        // Stock now or the next restock only mean something for trips landing soon after them.
+        const soon = g.land - nowS() < 90 * 60;
+        const nearRestock = b.pred && b.pred.at && Math.abs(g.land - b.pred.at) < 90 * 60;
+        const when = b.qty > 0 && soon ? `in stock (${num(b.qty)})` : nearRestock ? `restock ~${clock(b.pred.at)}` : b.qty > 0 || !soon ? "should be in stock then" : "restock expected";
         return `<div class="buy"><b>${b.units} × ${esc(b.name)}</b> <span class="muted">· ${when} · ${Math.round(b.p * 100)}% sure · +${short(b.units * b.unit)}</span></div>`;
       })
       .join("");
@@ -1252,7 +1268,7 @@
     if (!planOut || nowS() - (planOut.at || 0) > 60) runPlan();
     const o = planOut;
     const m = usableMoney();
-    const hoursOpts = [1, 2, 4, 6, 8].map((h) => `<option value="${h}" ${S.planHours === h ? "selected" : ""}>${h} hour${h > 1 ? "s" : ""}</option>`).join("");
+    const hoursOpts = [1, 2, 4, 6, 8, 12, 24].map((h) => `<option value="${h}" ${S.planHours === h ? "selected" : ""}>${h === 24 ? "24 hours (whole day)" : h + " hour" + (h > 1 ? "s" : "")}</option>`).join("");
     const moneyTxt = m.manual
       ? `<b>${short(m.total)}</b> ✏️<small class="muted">your own number</small>`
       : !m.known

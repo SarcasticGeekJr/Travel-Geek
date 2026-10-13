@@ -141,3 +141,25 @@ test("plans hours ahead by projecting restock cycles (back from the UK at 10:30,
   const far = PLAN.availability(items[1], NOW + 22 * M + 3 * (2 * H + 30 * M), NOW).p;
   assert.ok(far > 0 && far < near, `near ${near} far ${far}`);
 });
+
+test("a big shop that is stocked most of the day counts as likely even hours ahead; a tiny restock doesn't", () => {
+  // Peony-like: 10,000 per restock, sells ~1,000 an hour (10 h), empty ~25 min. Currently sold out.
+  const big = item({ cc: "chi", id: 276, name: "Peony", qty: 0, cost: 5000, sell: 53000, type: "Flower", rate: 1000, amtTypical: 10000, emptyAvg: 25 * M, emptyN: 8, pred: { at: NOW + 20 * M, from: NOW + 10 * M, to: NOW + 30 * M, pct: 40 } });
+  // Neumune-like: 3 per restock, sells out in under 2 minutes, back about every 2 hours.
+  const tiny = item({ cc: "chi", id: 361, name: "Neumune Tablet", qty: 0, cost: 900000, sell: 1500000, type: "Medical", rate: 103, amtTypical: 3, emptyAvg: 2 * H, emptyN: 12, pred: { at: NOW + 20 * M, from: NOW + 10 * M, to: NOW + 30 * M, pct: 60 } });
+  const far = NOW + 14 * H; // many cycles ahead
+  const a = PLAN.availability(big, far, NOW);
+  const b = PLAN.availability(tiny, far, NOW);
+  assert.ok(a.p >= 0.7, `big shop should be likely, got ${a.p}`);
+  assert.ok(a.avail > 1000);
+  assert.ok(b.p < 0.2, `tiny restock should stay unlikely, got ${b.p}`);
+});
+
+test("a whole-day plan chains several long trips", () => {
+  const items = [
+    item({ cc: "chi", id: 276, name: "Peony", qty: 3000, cost: 5000, sell: 53000, type: "Flower", rate: 1000, amtTypical: 10000, emptyAvg: 25 * M, emptyN: 8 }),
+  ];
+  const r = PLAN.make(base(items, { end: NOW + 24 * H }));
+  assert.ok(r.best.legs.length >= 4, `expected 4+ China trips in 24h, got ${r.best.legs.length}`);
+  assert.ok(r.best.exp > 0.6 * r.best.best, "expected profit should stay close to best case");
+});
