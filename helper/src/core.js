@@ -54,9 +54,23 @@ export function speedOf(type, subType, bazaars) {
 // two looks. We take the middle of that gap and keep a cycle only when the gap was small enough to trust.
 // A look reported by a player standing in the shop (precise: true) is exact.
 const MAX_EDGE_ERR = 20 * 60; // ignore an empty→restock cycle if either edge is unsure by more than this
-const KEEP_CYCLES = 30;
+const KEEP_CYCLES = 60; // accuracy kept improving with more history (61% after 3-5 restocks, 95% after 21+)
 const KEEP_ERRS = 20;
 const HIT = 10 * 60; // a prediction within 10 minutes counts as a hit
+const KEEP_TRACK = 8; // last predictions vs what happened, shown on each item
+const KEEP_TOPS = 20;
+
+// How many restocks an empty spell of length v really was: 2 or 3 when a small, fast-selling restock
+// (gone in under 15 minutes) could have come and gone unseen and v is about 2x or 3x the usual.
+export function hiddenRestocks(state, v) {
+  const c = state.cycles || [];
+  const amts = (state.amts || []).slice(-10);
+  if (c.length < 4 || !(state.rate > 0) || !amts.length) return 1;
+  if (Math.max(...amts) / state.rate >= 0.25) return 1; // restocks last a while: we'd have seen them
+  const m = wQuantile(c, 0.5);
+  const k = Math.round(v / m);
+  return k >= 2 && k <= 3 && Math.abs(v - k * m) < 0.2 * m ? k : 1;
+}
 
 // state: the stored per-item record (or undefined). obs: { qty, cost, name, at, precise } from a provider or a player.
 export function observe(state, obs) {
@@ -81,11 +95,24 @@ export function observe(state, obs) {
     if (trusted) {
       const cycles = [...(state.cycles || [])];
       const starts = [...(state.starts || cycles.map(() => null))];
-      cycles.push(mid - state.emptySince);
-      starts.push(state.emptySince);
+      const v = mid - state.emptySince;
+      // Hidden restocks: a small restock can arrive and sell out between two looks, so the shop seems to stay
+      // empty two or three times as long as usual. Count those as the restocks they were.
+      const k = hiddenRestocks(state, v);
+      for (let j = 0; j < k; j++) {
+        cycles.push(v / k);
+        starts.push(state.emptySince + (j * v) / k);
+      }
+      if (k > 1) s.hidden = (state.hidden || 0) + k - 1;
       s.cycles = cycles.slice(-KEEP_CYCLES);
       s.starts = starts.slice(-KEEP_CYCLES);
-      if (state.pending && state.pending.at) s.errs = [...(state.errs || []), mid - state.pending.at].slice(-KEEP_ERRS);
+      if (state.pending && state.pending.at) {
+        // Score the prediction against the restock it was about. If that one came unseen, it was right.
+        let e = mid - state.pending.at;
+        if (k > 1) e = mid - (state.pending.at + ((k - 1) * v) / k);
+        s.errs = [...(state.errs || []), e].slice(-KEEP_ERRS);
+        s.track = [...(state.track || []), [state.pending.at, mid, k > 1 ? k - 1 : 0]].slice(-KEEP_TRACK);
+      }
       s.method = bestMethod(s.cycles, s.starts);
     }
     s.amts = [...(state.amts || []), obs.qty].slice(-KEEP_CYCLES);
@@ -95,6 +122,8 @@ export function observe(state, obs) {
   } else if (state.qty > 0 && obs.qty > state.qty) {
     s.lastRestock = mid; // topped up before running out
     s.restockErr = edgeErr;
+    // Real top-ups, not players selling a few back (up to 100 each): learn how often big shops are refilled.
+    if (obs.qty - state.qty >= Math.max(150, state.qty * 0.1) && edgeErr <= MAX_EDGE_ERR) s.tops = [...(state.tops || []), mid].slice(-KEEP_TOPS);
   }
 
   // Selling speed: units that disappeared between two looks an hour or less apart.
@@ -147,7 +176,8 @@ const METHOD_LABEL_PREDICT = { recent: "recent restocks", median: "all restocks"
 export function bestMethod(cycles, starts) {
   const n = cycles.length;
   if (n < 5) return "recent";
-  const score = {};
+  const score = {},
+    counts = {};
   for (const m of Object.keys(METHODS_PREDICT)) {
     const errs = [];
     for (let i = Math.max(3, n - 10); i < n; i++) {
@@ -155,9 +185,12 @@ export function bestMethod(cycles, starts) {
       if (g != null) errs.push(Math.abs(g - cycles[i]));
     }
     if (errs.length >= 2) score[m] = quant(errs, 0.5);
+    counts[m] = errs.length;
   }
+  // Tested on 955 real restocks: always using "recent" beat switching on small differences (78% vs 77%
+  // within 10 min), so only switch when another method is clearly better on enough restocks.
   let best = "recent";
-  for (const m of Object.keys(score)) if (score[m] < (score[best] ?? Infinity)) best = m;
+  for (const m of Object.keys(score)) if (m !== "recent" && counts[m] >= 6 && score[m] + 180 < (score[best] ?? Infinity)) best = m;
   return best;
 }
 
@@ -260,6 +293,10 @@ export function buildItems(countries, prices, now, types) {
         // How long it usually stays empty, also while it's in stock, so plans can look several restocks ahead.
         emptyAvg: s.cycles && s.cycles.length ? quant(s.cycles.slice(-10), 0.5) : 0,
         emptyN: (s.cycles || []).length,
+        track: s.track || [], // [predicted, actual, hidden restocks] for the last few restocks
+        hidden: s.hidden || 0,
+        topEvery: s.tops && s.tops.length >= 3 ? quant(s.tops.slice(1).map((t, i) => t - s.tops[i]), 0.5) : 0,
+        lastTop: s.tops && s.tops.length ? s.tops[s.tops.length - 1] : 0,
         pred: predictRestock(s, now),
         type,
         speed: speedOf(type, ty.st, p && p.bz),

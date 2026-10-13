@@ -40,6 +40,10 @@ Tells you which trips to make, in order, for the most profit in the time you hav
 - **⭐ Watch** items to always see them and always get alerts; **hide** items you never want.
 - **In the foreign shop:** a **Fill** button next to Buy types the right amount into the box (your plan's amount, limited by room, stock and cash). You still press Buy yourself. Items in your plan get a green outline. The shop also tells Travel Geek your exact capacity.
 - **How accurate?** Every restock the helper sees is checked against what it predicted. Each item shows its hit rate ("7 of 9 within 10 min") and which method works best for it (recent restocks, all restocks, last 3, or same time of day).
+- **Always learning:** the helper checks every item in all 11 countries every minute, day and night, and keeps each item's last 60 restocks. Each item shows its last predictions next to what really happened ("10:21 → 10:39, 18m late"). On 955 real restocks, predictions were within 10 minutes 61% of the time for items with 3–5 restocks seen, and 95% for items with 21 or more.
+- **Hidden restocks:** a tiny restock (like Neumune Tablet's ~3) can arrive and sell out between two checks. The helper recognises an empty spell that's twice the usual as a restock nobody saw, so it doesn't learn the wrong timing, and a late item tells you it may have come and gone.
+- **Top-ups:** big shops that never sell out show how often they get topped up.
+- **World Tourism Day:** your capacity is doubled for the 48 hours of your own Tourism Day (read from Torn's calendar).
 
 ## 🛡 Cash Guard (against muggers)
 

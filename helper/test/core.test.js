@@ -386,3 +386,65 @@ test("Cash Guard alerts ignore the hourly limit but respect quiet hours and swit
   assert.equal(decideAlerts({ items: [], st: { ...ME, quiet: { on: true, from: 0, to: 1439 } }, loc, sent: {}, now: T0, cash: 5e6 }).alerts.length, 0);
   assert.equal(decideAlerts({ items: [], st: { ...ME, types: { land: false, cash: false } }, loc, sent: {}, now: T0, cash: 5e6 }).alerts.length, 0);
 });
+
+// A Neumune-like item: ~3 per restock, ~100 sold an hour, empty ~2h each time. Looks every minute.
+function smallShop(cycles, startAt = 0) {
+  const pts = [];
+  let t = startAt;
+  for (const empty of cycles) {
+    pts.push([t, 3], [t + 60, 2], [t + 120, 0]); // in stock, selling, sold out (2 min)
+    for (let x = t + 120 + 5 * M; x < t + 120 + empty; x += 5 * M) pts.push([x, 0]); // looked at every 5 min
+    t += 120 + empty;
+  }
+  pts.push([t, 3]);
+  let s;
+  for (const [at, qty] of pts) s = observe(s, { at, qty, cost: 900000, name: "Neumune Tablet" });
+  return s;
+}
+
+test("an empty spell twice the usual for a tiny fast-selling restock counts as a hidden restock", () => {
+  const s = smallShop([2 * H, 2 * H, 2 * H, 2 * H, 2 * H, 4 * H + 4 * M]);
+  assert.equal(s.hidden, 1);
+  // The 4h spell became two ~2h restocks, so the usual stays ~2h.
+  assert.ok(s.cycles.slice(-2).every((c) => Math.abs(c - (2 * H + 2 * M)) < 5 * M), String(s.cycles.slice(-2)));
+});
+
+test("big shops never count a long spell as hidden restocks", () => {
+  let s;
+  const pts = [];
+  let t = 0;
+  for (const empty of [2 * H, 2 * H, 2 * H, 2 * H, 2 * H, 4 * H]) {
+    for (let x = t; x < t + 10 * H; x += 5 * M) pts.push([x, Math.max(1, 5000 - Math.round((x - t) / 7.2))]); // lasts 10 hours
+    pts.push([t + 10 * H, 0]);
+    for (let x = t + 10 * H + 5 * M; x < t + 10 * H + empty; x += 5 * M) pts.push([x, 0]);
+    t += 10 * H + empty;
+  }
+  pts.push([t, 5000]);
+  for (const [at, qty] of pts) s = observe(s, { at, qty, cost: 1000, name: "Peony" });
+  assert.ok(!s.hidden);
+  assert.ok(s.cycles.some((c) => c >= 4 * H - 5 * M));
+});
+
+test("predictions are scored and kept as a track record (predicted, actual)", () => {
+  const s = smallShop([2 * H, 2 * H, 2 * H, 2 * H, 2 * H + 10 * M]);
+  assert.ok(s.track.length >= 1);
+  const [pred, actual, hidden] = s.track[s.track.length - 1];
+  assert.ok(actual > pred && actual - pred < 15 * M, `${pred} ${actual}`);
+  assert.equal(hidden, 0);
+});
+
+test("a hidden restock at the predicted time counts as a correct prediction", () => {
+  const s = smallShop([2 * H, 2 * H, 2 * H, 2 * H, 2 * H, 4 * H + 2 * M]);
+  const e = s.errs[s.errs.length - 1];
+  assert.ok(Math.abs(e) < 10 * M, String(e));
+  assert.equal(s.track[s.track.length - 1][2], 1);
+});
+
+test("big top-ups are learned, small sell-backs are not", () => {
+  let s;
+  const pts = [[0, 3000], [5 * M, 2500], [6 * M, 2560], [10 * M, 9000], [60 * M, 8000], [64 * M, 9800], [120 * M, 9000], [124 * M, 9900]];
+  for (const [at, qty] of pts) s = observe(s, { at, qty, cost: 1000, name: "Peony" });
+  assert.equal(s.tops.length, 3); // +6440, +1800, +900 count; +60 (sell-back) doesn't
+  const it = buildItems({ chi: { items: { 276: s } } }, {}, 130 * M).find((x) => x.key === "chi:276");
+  assert.ok(it.topEvery > 0 && it.lastTop === 122 * M, JSON.stringify([it.topEvery, it.lastTop]));
+});

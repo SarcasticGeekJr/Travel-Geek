@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.4.5
+// @version      1.5.0
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -34,7 +34,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.4.5"; // keep in sync with @version above
+  const VERSION = "1.5.0"; // keep in sync with @version above
   // Only one copy runs per page. If another copy got here first (usually an old one that was pasted in or
   // installed twice), say so, because otherwise updates seem to do nothing.
   if (window.__travelGeekLoaded) {
@@ -467,7 +467,46 @@
   function planMethod() {
     return S.method !== "auto" && S.method !== "business" ? S.method : autoMethod();
   }
-  const perkCap = (method) => (BASE_CAP[method] || 10) + ((me && me.cap && me.cap.parts) || []).reduce((t, p) => t + p.n, 0);
+  // World Tourism Day (once a year, around 27 September): capacity is doubled for 48 hours from your own start time.
+  const tourismOn = () => !!(me && me.tourism && me.tourism.until > nowS() && me.tourism.from <= nowS());
+  const perkCap = (method) => ((BASE_CAP[method] || 10) + ((me && me.cap && me.cap.parts) || []).reduce((t, p) => t + p.n, 0)) * (tourismOn() ? 2 : 1);
+  // Torn's calendar lists Tourism Day as one day; each player picks a start time and gets 48 hours from the day
+  // before at that time (same reading as other travel tools). Only asked for near the date.
+  async function loadTourism(force) {
+    const d = new Date(nowS() * 1000);
+    if (d.getUTCMonth() !== 8 || d.getUTCDate() < 25 || d.getUTCDate() > 29) return;
+    if (!force && me && me.tourism && nowS() - (me.tourism.at || 0) < 3600) return;
+    try {
+      const cal = await torn("/v2/torn/calendar", 60 * MIN, force);
+      const ev = ((cal.calendar && cal.calendar.events) || []).find((e) => /^(world\s+)?tourism day$/i.test(String(e.title || "").trim()));
+      let from = 0,
+        until = 0;
+      if (ev && ev.end > ev.start) {
+        from = ev.start;
+        until = ev.end;
+        if (ev.fixed_start_time !== true) {
+          const u = await torn("/v2/user/calendar", 60 * MIN, force);
+          const m = /^(\d{1,2}):(\d{2})/.exec(String((u.calendar && u.calendar.start_time) || "").trim());
+          if (m) {
+            const day = new Date(ev.start * 1000);
+            day.setUTCHours(+m[1], +m[2], 0, 0);
+            if (ev.end - ev.start <= 86400) {
+              from = day.getTime() / 1000 - 86400;
+              until = from + 2 * 86400;
+            } else {
+              const off = day.getTime() / 1000 - ev.start;
+              from = ev.start + off;
+              until = ev.end + off;
+            }
+          }
+        }
+      }
+      me.tourism = { at: nowS(), from, until };
+      store.set("me", me);
+    } catch (e) {
+      if (me) me.tourism = Object.assign({}, me.tourism, { at: nowS(), err: e.message });
+    }
+  }
   // What the foreign shop showed is exact, but only until your perks change (new airstrip, job, faction, book...).
   // Then the count from perks is used until the shop shows the new number.
   function shopCap(method) {
@@ -492,7 +531,7 @@
     if (seen) return { total: seen.cap, seen: true, seenAt: seen.at, parts: [], base: seen.cap, manual: false, known: true };
     const base = BASE_CAP[method] || 10;
     const parts = (me && me.cap && me.cap.parts) || [];
-    return { total: base + parts.reduce((t, p) => t + p.n, 0), base, parts, manual: false, known: !!(me && me.cap) };
+    return { total: perkCap(method), base, parts, manual: false, known: !!(me && me.cap) };
   }
   const extraFor = (type) => {
     const t = String(type || "").toLowerCase();
@@ -864,6 +903,20 @@
     return { cap, units, restock: it.qty > 0 ? 0 : restock, net, unit, trip, perHour: flight ? Math.round(trip / ((2 * flight) / 3600)) : 0, cash: units * it.cost, flight };
   }
 
+  // The last few predictions next to what really happened, so you can see it learning.
+  function trackHtml(it) {
+    const tr = (it.track || []).slice(-4).reverse();
+    if (!tr.length) return "";
+    const one = ([p, a, h]) => {
+      const d = Math.round((a - p) / 60);
+      const off = h ? "came unseen" : Math.abs(d) <= 1 ? "on time" : `${Math.abs(d)}m ${d > 0 ? "late" : "early"}`;
+      return `${clock(p)} → ${h ? clock(p) : clock(a)} <span class="${h || Math.abs(d) <= 10 ? "g" : "r"}">(${off})</span>`;
+    };
+    return `<div class="muted small">Last predictions: ${tr.map(one).join(" · ")}</div>`;
+  }
+  // Big shops that never sell out get topped up; say how often.
+  const topLine = (it) => (it.topEvery ? `<div class="muted">Topped up about every ${dur(it.topEvery)}${it.lastTop ? ` · last ${clock(it.lastTop)}` : ""}.</div>` : "");
+
   // What to do about one item: { kind, text, leaveAt?, land? }.
   function plan(it, p) {
     const t = nowS(),
@@ -883,8 +936,19 @@
       const size = PLAN.restockSize(it);
       const sellOut = it.rate > 0 && size ? (size / it.rate) * 3600 : Infinity;
       const so = it.emptySince ? ` Empty for ${dur(t - it.emptySince)}, usually ${dur(it.emptyAvg || pr.avg || 0)}.` : "";
-      if (sellOut < 30 * 60)
-        return { kind: "late", text: `Restock is late: expected ~${clock(pr.at)}, still empty.${so} It could come any minute, but ~${num(size)} sell out in about ${dur(Math.max(60, sellOut))}, so leaving now won't catch it. Once it restocks, the next one is about ${dur(sellOut + (it.emptyAvg || pr.avg || 0))} later.` };
+      if (sellOut < 30 * 60) {
+        // A small restock sells out in minutes, so it may already have come and gone between two looks.
+        // Then the next one is about one usual cycle after the expected time: give that as a guess.
+        const cyc = sellOut + (it.emptyAvg || pr.avg || 0);
+        const unseen = sellOut < 15 * 60 ? ` A restock of ~${num(size)} can sell out between checks, so it may have come and gone unseen.` : "";
+        let next = pr.at + cyc;
+        while (next - 120 - fl <= t && cyc > 0) next += cyc;
+        const nLand = next - 120,
+          nLeave = nLand - fl;
+        if (cyc > 0 && nLeave - t < 4 * 3600)
+          return { kind: "wait", text: `Restock is late: expected ~${clock(pr.at)}.${unseen || so} Next one is a guess, ~${clock(next)}: leave at ${clock(nLeave)} (in ${dur(nLeave - t)}) → land ${clock(nLand)}.`, leaveAt: nLeave, land: nLand };
+        return { kind: "late", text: `Restock is late: expected ~${clock(pr.at)}, still empty.${so}${unseen}` };
+      }
       return { kind: "go", text: `Restock is late: expected ~${clock(pr.at)}, still empty.${so} It should be back by the time you land: leave now → land ${clock(t + fl)}.`, land: t + fl };
     }
     const land = pr.at - 120;
@@ -1050,7 +1114,7 @@
     $("[data-act=refresh]").classList.add("spinning");
     view.err = null;
     try {
-      await Promise.all([loadData(force), loadMe(force), loadTypes(), loadTicketValue()]);
+      await Promise.all([loadData(force), loadMe(force).then(() => loadTourism(force)), loadTypes(), loadTicketValue()]);
       await loadMoney(force);
       labelTypes();
       runPlan();
@@ -1375,7 +1439,7 @@
           <select class="p-hours">${hoursOpts}<option value="0" ${!S.planHours ? "selected" : ""}>Until a time…</option></select>
           <input class="p-until" type="time" value="${timeVal(S.planUntil)}" ${S.planHours ? "hidden" : ""}>
         </div>
-        <div class="ctl"><span>I carry</span><button class="link2" data-act="setup">${capFor(planMethod())} items${extraFor("flower") ? ` +${extraFor("flower")} flowers` : ""}${extraFor("plushie") ? ` +${extraFor("plushie")} plushies` : ""} · ${esc(METHOD_LABEL[planMethod()])} ✏️</button></div>
+        <div class="ctl"><span>I carry</span><button class="link2" data-act="setup">${capFor(planMethod())} items${extraFor("flower") ? ` +${extraFor("flower")} flowers` : ""}${extraFor("plushie") ? ` +${extraFor("plushie")} plushies` : ""} · ${esc(METHOD_LABEL[planMethod()])}${tourismOn() ? " · Tourism Day ×2" : ""} ✏️</button></div>
         <div class="ctl"><span>Money I can use</span><button class="link2 money" data-act="money">${moneyTxt}</button></div>
         <div class="ctl"><span>Between trips</span>
           <div class="sorts slim">${[
@@ -1530,10 +1594,10 @@
           pr && pr.at
             ? `${pr.overdue || (pr.to && nowS() > pr.to)
               ? `<div>Next restock: <b class="a">late</b> · expected ~${clock(pr.at)} (between ${clock(pr.from)} and ${clock(pr.to)}), still empty. Could be back any minute.</div><div class="muted">When it comes, the helper checks how far off this was and learns from it.</div>`
-              : `<div>Next restock: <b>~${clock(pr.at)}</b> (between ${clock(pr.from)} and ${clock(pr.to)}) · <b>${pr.pct != null ? pr.pct + "% sure" : CONF[pr.conf] + " confidence"}</b></div>`}<div class="muted">Usually empty for ${dur(pr.avg || 0)} · ${pr.n} restock${pr.n === 1 ? "" : "s"} seen${pr.scored ? ` · last ${pr.scored} predictions: ${pr.hits} within 10 min, usually off by ${dur(pr.err || 0)}` : ""}${pr.methodLabel ? ` · based on ${esc(pr.methodLabel)}` : ""}</div>`
+              : `<div>Next restock: <b>~${clock(pr.at)}</b> (between ${clock(pr.from)} and ${clock(pr.to)}) · <b>${pr.pct != null ? pr.pct + "% sure" : CONF[pr.conf] + " confidence"}</b></div>`}${trackHtml(it)}<div class="muted">Usually empty for ${dur(pr.avg || 0)} · ${pr.n} restock${pr.n === 1 ? "" : "s"} seen${it.hidden ? ` (${it.hidden} came and went unseen)` : ""}${pr.scored ? ` · last ${pr.scored} predictions: ${pr.hits} within 10 min, usually off by ${dur(pr.err || 0)}` : ""}${pr.methodLabel ? ` · based on ${esc(pr.methodLabel)}` : ""}</div>`
             : it.qty === 0
               ? `<div class="muted">${data.fromHelper ? "Not enough restock history yet. It improves the longer the helper runs." : "Restock predictions need the helper."}</div>`
-              : ""
+              : `${trackHtml(it)}${topLine(it)}`
         }
       </div>
       <h3>Flight</h3>
@@ -1564,6 +1628,7 @@
                 ? `<div class="small muted">Read from the foreign shop (&ldquo;purchased X / ${auto.total}&rdquo;) on ${new Date(auto.seenAt * 1000).toLocaleDateString()}. This is exact.</div>`
                 : `<div class="small muted">${auto.known ? "Worked out from your perks:" : apiKey() ? "Couldn't read your perks yet (needs a Limited or Full key)." : "Add your API key to work this out."}</div>
                  <div class="small">Base ${auto.base} (${esc(METHOD_LABEL[myMethod()])})</div>
+                 ${tourismOn() ? `<div class="small g">×2 for World Tourism Day, until ${clock(me.tourism.until)}</div>` : ""}
                  ${auto.parts.map((p) => `<div class="small">${esc(/^\+/.test(p.text) ? p.text : `+${p.n} · ${p.text}`)} <span class="muted">(${esc(p.group)})</span></div>`).join("")}`
               : `<div class="small muted">Set by you.</div>`
           }
