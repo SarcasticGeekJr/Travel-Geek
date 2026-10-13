@@ -25,6 +25,25 @@ jobs:
           for i in sorted(items, key=lambda i: -((i.get("sell") or 0) - i.get("cost", 0)))[:15]:
               print(f'{i["key"]:9} {i["name"][:22]:22} qty {i["qty"]:>6} cost {i["cost"]:>9} sell {i.get("sell", 0):>9} {i.get("type", "")} ({i.get("speed")}) pred {i.get("pred")}')
           PY
+      - name: Torn API docs (faction balance and money)
+        run: |
+          curl -sS -m 30 https://api.torn.com/v2/openapi.json -o spec.json || true
+          python3 - <<'PY'
+          import json
+          try:
+              d = json.load(open("spec.json"))
+          except Exception as e:
+              print("no spec:", e); raise SystemExit
+          print("spec version:", d.get("info", {}).get("version"))
+          print("user paths with money/balance/faction:", [p for p in d["paths"] if p.startswith("/user") and any(w in p for w in ("money", "balance", "faction"))])
+          sc = d.get("components", {}).get("schemas", {})
+          for k in sc:
+              if "FactionBalance" in k or k.startswith("UserMoney"):
+                  print(k, json.dumps(sc[k])[:600])
+          names = json.dumps(sc.get("UserSelectionName", {}))
+          print("factionbalance in selection names:", "factionbalance" in names, "| money:", '"money"' in names)
+          PY
+          for u in "v2/user/factionbalance" "v2/user/?selections=factionbalance" "v2/user/money" "user/?selections=money"; do echo "$u -> $(curl -sS -m 20 "https://api.torn.com/$u$( [[ $u == *\?* ]] && echo '&' || echo '?')key=AAAAAAAAAAAAAAAA")"; done
       - name: Full state (for replaying the planner)
         run: |
           curl -sS -m 30 "https://travel-geek.sakthiramkumar12.workers.dev/api/state" | python3 -c "import json,sys; d=json.load(sys.stdin); print('STATE-JSON', json.dumps({'now': d.get('tickAt'), 'items': d.get('items', [])}, separators=(',', ':')))"
