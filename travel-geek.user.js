@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.4.0
+// @version      1.4.1
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -34,12 +34,24 @@
 (function () {
   "use strict";
 
-  if (window.__travelGeekLoaded) return;
-  window.__travelGeekLoaded = true;
+  const VERSION = "1.4.1"; // keep in sync with @version above
+  // Only one copy runs per page. If another copy got here first (usually an old one that was pasted in or
+  // installed twice), say so, because otherwise updates seem to do nothing.
+  if (window.__travelGeekLoaded) {
+    const other = window.__travelGeekLoaded;
+    if (other !== VERSION && document.body) {
+      const d = document.createElement("div");
+      d.style.cssText = "position:fixed;left:8px;right:8px;bottom:70px;z-index:2147483647;background:#7a1f1f;color:#fff;font:14px/1.4 sans-serif;padding:10px 12px;border-radius:10px;box-shadow:0 4px 16px #0008";
+      d.innerHTML = "<b>Travel Geek: two copies are installed.</b> An older copy" + (typeof other === "string" ? " (v" + other + ")" : "") + " is running, so v" + VERSION + " can&rsquo;t. In Torn PDA go to Settings &rarr; Userscripts, delete the old Travel Geek and keep the one with the remote link. <u>Close</u>";
+      d.addEventListener("click", () => d.remove());
+      document.body.appendChild(d);
+    }
+    return;
+  }
+  window.__travelGeekLoaded = VERSION;
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.4.0"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.user.js";
   const DEFAULT_HELPER = "https://travel-geek.sakthiramkumar12.workers.dev";
   const YATA = "https://yata.yt/api/v1/travel/export/";
