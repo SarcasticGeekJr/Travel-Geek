@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.3.0
+// @version      1.3.1
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -39,7 +39,7 @@
 
   // ---------------------------------------------------------------- config
   const PDA_KEY = "###PDA-APIKEY###"; // Torn PDA replaces this with your key at runtime
-  const VERSION = "1.3.0"; // keep in sync with @version above
+  const VERSION = "1.3.1"; // keep in sync with @version above
   const UPDATE_URL = "https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.user.js";
   const DEFAULT_HELPER = "https://travel-geek.sakthiramkumar12.workers.dev";
   const YATA = "https://yata.yt/api/v1/travel/export/";
@@ -423,30 +423,45 @@
   }
 
   // The ticket you fly with: your choice, else the one from your last trip, else the best your perks allow.
+  // Automatic: the best ticket your perks allow, or your last trip's if that was better (Business is
+  // never assumed, it's a one-off ticket). A last trip flown before you bought an airstrip doesn't count.
+  const METHOD_RANK = { standard: 0, airstrip: 1, wlt: 2 };
+  function autoMethod() {
+    const perk = me && me.cap ? (me.cap.wlt ? "wlt" : me.cap.airstrip ? "airstrip" : "standard") : null;
+    const last = me && me.lastMethod && me.lastMethod !== "business" ? me.lastMethod : null;
+    if (perk && last) return METHOD_RANK[last] > METHOD_RANK[perk] ? last : perk;
+    return perk || last || "standard";
+  }
   function myMethod() {
-    if (S.method !== "auto") return S.method;
-    if (me && me.lastMethod) return me.lastMethod;
-    if (me && me.cap) return me.cap.wlt ? "wlt" : me.cap.airstrip ? "airstrip" : "standard";
-    return "standard";
+    return S.method !== "auto" ? S.method : autoMethod();
   }
   // Your normal ticket for planning: Business only through the tickets you say you have.
   function planMethod() {
-    if (S.method !== "auto" && S.method !== "business") return S.method;
-    if (me && me.cap) return me.cap.wlt ? "wlt" : me.cap.airstrip ? "airstrip" : "standard";
-    return me && me.lastMethod && me.lastMethod !== "business" ? me.lastMethod : "standard";
+    return S.method !== "auto" && S.method !== "business" ? S.method : autoMethod();
+  }
+  const perkCap = (method) => (BASE_CAP[method] || 10) + ((me && me.cap && me.cap.parts) || []).reduce((t, p) => t + p.n, 0);
+  // What the foreign shop showed is exact, but only until your perks change (new airstrip, job, faction, book...).
+  // Then the count from perks is used until the shop shows the new number.
+  function shopCap(method) {
+    const seen = S.capSeen && S.capSeen[method];
+    if (!seen || !seen.cap) return null;
+    if (!(me && me.cap)) return seen;
+    const now = perkCap(method);
+    if (seen.perks != null ? seen.perks === now : seen.cap >= now) return seen;
+    return null;
   }
   // Capacity for a ticket: what the foreign shop showed you beats the count from perks.
   function capFor(method) {
     if (S.capOverride > 0) return S.capOverride;
-    const seen = S.capSeen && S.capSeen[method];
-    if (seen && seen.cap) return seen.cap;
-    return (BASE_CAP[method] || 10) + ((me && me.cap && me.cap.parts) || []).reduce((t, p) => t + p.n, 0);
+    const seen = shopCap(method);
+    if (seen) return seen.cap;
+    return perkCap(method);
   }
   function myCapacity() {
     if (S.capOverride > 0) return { total: S.capOverride, manual: true, parts: [], base: S.capOverride };
     const method = myMethod();
-    const seen = S.capSeen && S.capSeen[method];
-    if (seen && seen.cap) return { total: seen.cap, seen: true, seenAt: seen.at, parts: [], base: seen.cap, manual: false, known: true };
+    const seen = shopCap(method);
+    if (seen) return { total: seen.cap, seen: true, seenAt: seen.at, parts: [], base: seen.cap, manual: false, known: true };
     const base = BASE_CAP[method] || 10;
     const parts = (me && me.cap && me.cap.parts) || [];
     return { total: base + parts.reduce((t, p) => t + p.n, 0), base, parts, manual: false, known: !!(me && me.cap) };
@@ -1288,6 +1303,7 @@
           <select class="p-hours">${hoursOpts}<option value="0" ${!S.planHours ? "selected" : ""}>Until a time…</option></select>
           <input class="p-until" type="time" value="${timeVal(S.planUntil)}" ${S.planHours ? "hidden" : ""}>
         </div>
+        <div class="ctl"><span>I carry</span><button class="link2" data-act="setup">${capFor(planMethod())} items${extraFor("flower") ? ` +${extraFor("flower")} flowers` : ""}${extraFor("plushie") ? ` +${extraFor("plushie")} plushies` : ""} · ${esc(METHOD_LABEL[planMethod()])} ✏️</button></div>
         <div class="ctl"><span>Money I can use</span><button class="link2 money" data-act="money">${moneyTxt}</button></div>
         <div class="ctl"><span>Between trips</span>
           <div class="sorts slim">${[
@@ -1946,8 +1962,8 @@
     // 1. Your real capacity for this ticket.
     const capInfo = shopCapacity();
     const method = (me && me.travel && METHOD_FROM_API[String(me.travel.method || "").toLowerCase()]) || myMethod();
-    if (capInfo && (!S.capSeen[method] || S.capSeen[method].cap !== capInfo.cap)) {
-      S.capSeen[method] = { cap: capInfo.cap, at: nowS() };
+    if (capInfo && (!S.capSeen[method] || S.capSeen[method].cap !== capInfo.cap || (me && me.cap && S.capSeen[method].perks !== perkCap(method)))) {
+      S.capSeen[method] = { cap: capInfo.cap, at: nowS(), perks: me && me.cap ? perkCap(method) : null };
       save();
       syncSoon();
     }

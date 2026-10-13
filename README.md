@@ -32,7 +32,7 @@ Tells you which trips to make, in order, for the most profit in the time you hav
 ## What it does
 
 - **✈️ button** on every Torn page. The green number on it = good runs you could start right now.
-- **Your setup, worked out for you:** how many items you can carry, from your perks (airstrip, suitcase, job, faction, books), and your ticket type (from your last trip). Fix it in ⚙ → Your setup only if it's wrong.
+- **Your setup, worked out for you:** how many items you can carry, from your perks (airstrip, suitcase, job, faction, books), re-read every time you open Torn, and your ticket (the best your perks allow, so a new airstrip counts straight away). The foreign shop's exact number is used until your perks change. The planner shows it as "I carry". Fix it in ⚙ → Your setup only if it's wrong.
 - **Best runs:** every item abroad with profit per trip (for what *you* can carry, after the 5% fee) and profit per hour of flying. A **sells fast / slowly** badge, so cheap guns and armour that are hard to sell don't fool you. For other items (like the newer contraband), a market with 200+ bazaars selling it counts as fast and one with under 80 as slow.
 - **When to leave:** for empty items, "Leave at 17:42 → land 18:46 for the restock ~18:48", with how sure it is (high / medium / low) and the restock window.
 - **Cash to take:** the exact amount, so you don't carry extra money abroad.
