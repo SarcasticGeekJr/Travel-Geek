@@ -140,7 +140,10 @@ export class Hub extends DurableObject {
     const t = now();
     const last = await this.ctx.storage.get("meta");
     if (last && last.tickAt && t - last.tickAt < 40) return { skipped: true };
-    if (this.ticking && t - this.ticking < 120) return { skipped: true, busy: true };
+    if (this.ticking && t - this.ticking < 120) {
+      console.log("tick skipped: another run is busy since", t - this.ticking, "s");
+      return { skipped: true, busy: true };
+    }
     this.ticking = t;
     try {
       return await this.tickNow(t);
@@ -150,8 +153,11 @@ export class Hub extends DurableObject {
   }
 
   async tickNow(t) {
+    const t0 = Date.now();
+    const step = (what) => console.log(`tick ${what} +${Date.now() - t0}ms`);
     const report = { at: t, countries: 0, users: 0, sent: 0, errors: [] };
     let countries = await this.countries();
+    step("start");
 
     try {
       const { stocks, source } = await this.readStocks();
@@ -169,7 +175,9 @@ export class Hub extends DurableObject {
         report.countries++;
       }
       writes.meta = { tickAt: t, source };
+      step("stocks read, writing " + Object.keys(writes).length);
       await this.ctx.storage.put(writes);
+      step("stocks saved");
     } catch (e) {
       report.errors.push("stocks: " + e.message);
       for (const [name, err] of Object.entries(e.details || {})) report.errors.push(`${name}: ${err}`);
@@ -189,6 +197,7 @@ export class Hub extends DurableObject {
       }
     }
 
+    step("prices done");
     const users = (await this.ctx.storage.get("users")) || {};
     const active = Object.values(users).filter((u) => !u.off).slice(0, MAX_USERS);
 
@@ -206,9 +215,14 @@ export class Hub extends DurableObject {
         report.errors.push("types: " + e.message);
       }
     }
+    step("types done");
     const items = buildItems(countries, prices && prices.items, t, types && types.map);
+    step("items built: " + items.length);
     const crowd = crowdEntries(active, t);
-    await Promise.all(active.map((u) => this.checkUser(u, items, t, report, crowd)));
+    // One slow user must never hold up the whole run.
+    const limit = (p, ms, what) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error(what + " took over " + ms / 1000 + "s")), ms))]);
+    await Promise.all(active.map((u) => limit(this.checkUser(u, items, t, report, crowd), 25000, "user check").catch((e) => report.errors.push(e.message))));
+    step("users checked: " + active.length);
     // Someone may have signed up or changed settings while we were waiting on the network:
     // re-read and only write back what this tick learned.
     const fresh = (await this.ctx.storage.get("users")) || {};
@@ -221,6 +235,7 @@ export class Hub extends DurableObject {
     }
     await this.ctx.storage.put("users", fresh);
     await this.ctx.storage.put("report", report); // shown in /api/state so problems are visible
+    step("done, errors: " + JSON.stringify(report.errors).slice(0, 300));
     return report;
   }
 

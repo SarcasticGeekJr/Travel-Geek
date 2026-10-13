@@ -1,4 +1,4 @@
-# Shows the helper's live log for about 2 minutes (each run every minute, with any error). Run it from the Actions tab.
+# Shows the helper's live log for about 3 minutes (each run every minute, with any error). Run it from the Actions tab.
 name: Helper log
 
 on:
@@ -12,14 +12,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Live log (2 minutes)
+      - name: Live log (3 minutes)
         working-directory: helper
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           npm ci --no-audit --no-fund
-          timeout 130 npx wrangler tail travel-geek --format json > tail.json || true
+          timeout 190 npx wrangler tail travel-geek --format json > tail.json || true
           python3 - <<'PY'
           import json
           raw = open("tail.json").read()
@@ -35,6 +35,6 @@ jobs:
               e = ev.get("event") or {}
               print("EVENT", ev.get("eventTimestamp"), ev.get("outcome"), e.get("cron") or (e.get("request") or {}).get("url"),
                     "| exceptions:", [x.get("message") for x in ev.get("exceptions", [])],
-                    "| logs:", [str(l.get("message"))[:300] for l in ev.get("logs", [])][:5])
+                    "| logs:", [str(l.get("message"))[:300] for l in ev.get("logs", [])][:20])
           print("events:", n)
           PY
