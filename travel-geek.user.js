@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.4.4
+// @version      1.4.5
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -34,7 +34,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.4.4"; // keep in sync with @version above
+  const VERSION = "1.4.5"; // keep in sync with @version above
   // Only one copy runs per page. If another copy got here first (usually an old one that was pasted in or
   // installed twice), say so, because otherwise updates seem to do nothing.
   if (window.__travelGeekLoaded) {
@@ -607,7 +607,7 @@
       if (it.qty > 0) {
         if (!perSec || !emptyFor) return null;
         first = it.updated + it.qty / perSec + emptyFor; // sells out, then usually back after this long
-      } else if (pr && pr.at && !pr.overdue) first = pr.at;
+      } else if (pr && pr.at && !pr.overdue && !(pr.to && now > pr.to)) first = pr.at;
       else return null;
       const sellOut = perSec && size ? size / perSec : 0;
       return { first, cycle: sellOut && emptyFor ? sellOut + emptyFor : 0, size, perSec, sure, window };
@@ -623,7 +623,7 @@
         if (left >= 1) return { avail: Math.floor(left), p: stale ? 0.6 : 0.95 };
       } else {
         const pr = it.pred;
-        if (pr && pr.overdue) return { avail: restockSize(it) || 100, p: 0.2 };
+        if (pr && (pr.overdue || (pr.to && now > pr.to))) return { avail: restockSize(it) || 100, p: 0.2 };
       }
       const c = cycleOf(it, now);
       if (!c) return { avail: 0, p: 0 };
@@ -878,7 +878,15 @@
     const pr = it.pred;
     if (!pr || !pr.at || pr.conf === "none")
       return { kind: "unknown", text: data && data.fromHelper ? "Empty. Not enough restock history yet to predict." : "Empty. Restock predictions need the helper (⚙ → Phone alerts)." };
-    if (pr.overdue) return { kind: "overdue", text: `Empty. Restock is overdue (usually after ${dur(pr.avg || 0)}), so it could be back any time.` };
+    // Window over and still empty: say so now (the helper only flags it as overdue 15 minutes later).
+    if (pr.overdue || (pr.to && t > pr.to)) {
+      const size = PLAN.restockSize(it);
+      const sellOut = it.rate > 0 && size ? (size / it.rate) * 3600 : Infinity;
+      const so = it.emptySince ? ` Empty for ${dur(t - it.emptySince)}, usually ${dur(it.emptyAvg || pr.avg || 0)}.` : "";
+      if (sellOut < 30 * 60)
+        return { kind: "late", text: `Restock is late: expected ~${clock(pr.at)}, still empty.${so} It could come any minute, but ~${num(size)} sell out in about ${dur(Math.max(60, sellOut))}, so leaving now won't catch it. Once it restocks, the next one is about ${dur(sellOut + (it.emptyAvg || pr.avg || 0))} later.` };
+      return { kind: "go", text: `Restock is late: expected ~${clock(pr.at)}, still empty.${so} It should be back by the time you land: leave now → land ${clock(t + fl)}.`, land: t + fl };
+    }
     const land = pr.at - 120;
     const leaveAt = land - fl;
     if (leaveAt <= t) {
@@ -1148,7 +1156,7 @@
   const SPEED = { fast: `<span class="pill good">sells fast</span>`, slow: `<span class="pill bad">sells slowly</span>`, medium: `<span class="pill even">sells OK</span>`, unknown: "" };
   function row({ it, p, pl, watched }) {
     const c = COUNTRIES[it.cc];
-    const stock = it.qty > 0 ? `${num(it.qty)} in stock · ${ago(it.updated)} ago` : `<span class="a">Empty</span>${it.pred && it.pred.at && !it.pred.overdue ? ` · back ~${clock(it.pred.at)} (${it.pred.pct != null ? it.pred.pct + "%" : CONF[it.pred.conf].toLowerCase()})` : it.pred && it.pred.overdue ? " · overdue" : ""}`;
+    const stock = it.qty > 0 ? `${num(it.qty)} in stock · ${ago(it.updated)} ago` : `<span class="a">Empty</span>${it.pred && it.pred.at && !it.pred.overdue && !(it.pred.to && nowS() > it.pred.to) ? ` · back ~${clock(it.pred.at)} (${it.pred.pct != null ? it.pred.pct + "%" : CONF[it.pred.conf].toLowerCase()})` : it.pred && it.pred.at ? " · late" : ""}`;
     const tag = pl.kind === "go" ? `<span class="g">Go now</span>` : pl.kind === "wait" ? `<span class="acc">Leave ${clock(pl.leaveAt)}</span>` : pl.kind === "late" ? `<span class="r">Too late</span>` : "";
     return `<button class="row" data-act="item" data-key="${it.key}">
       <img src="${img(it.id)}" alt="" loading="lazy">
@@ -1520,7 +1528,9 @@
         <div class="muted">Selling speed: ${it.rate ? `~${num(it.rate)}/hour` : "unknown"}${it.amt ? ` · last restock brought ~${num(it.amt)}` : ""}${it.lastRestock ? ` · last restock ${clock(it.lastRestock)}` : ""}</div>
         ${
           pr && pr.at
-            ? `<div>Next restock: <b>~${clock(pr.at)}</b> (between ${clock(pr.from)} and ${clock(pr.to)}) · <b>${pr.pct != null ? pr.pct + "% sure" : CONF[pr.conf] + " confidence"}</b>${pr.overdue ? " · <span class='a'>overdue</span>" : ""}</div><div class="muted">Usually empty for ${dur(pr.avg || 0)} · ${pr.n} restock${pr.n === 1 ? "" : "s"} seen${pr.scored ? ` · last ${pr.scored} predictions: ${pr.hits} within 10 min, usually off by ${dur(pr.err || 0)}` : ""}${pr.methodLabel ? ` · based on ${esc(pr.methodLabel)}` : ""}</div>`
+            ? `${pr.overdue || (pr.to && nowS() > pr.to)
+              ? `<div>Next restock: <b class="a">late</b> · expected ~${clock(pr.at)} (between ${clock(pr.from)} and ${clock(pr.to)}), still empty. Could be back any minute.</div><div class="muted">When it comes, the helper checks how far off this was and learns from it.</div>`
+              : `<div>Next restock: <b>~${clock(pr.at)}</b> (between ${clock(pr.from)} and ${clock(pr.to)}) · <b>${pr.pct != null ? pr.pct + "% sure" : CONF[pr.conf] + " confidence"}</b></div>`}<div class="muted">Usually empty for ${dur(pr.avg || 0)} · ${pr.n} restock${pr.n === 1 ? "" : "s"} seen${pr.scored ? ` · last ${pr.scored} predictions: ${pr.hits} within 10 min, usually off by ${dur(pr.err || 0)}` : ""}${pr.methodLabel ? ` · based on ${esc(pr.methodLabel)}` : ""}</div>`
             : it.qty === 0
               ? `<div class="muted">${data.fromHelper ? "Not enough restock history yet. It improves the longer the helper runs." : "Restock predictions need the helper."}</div>`
               : ""
