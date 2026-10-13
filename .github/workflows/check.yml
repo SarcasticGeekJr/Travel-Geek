@@ -27,13 +27,15 @@ jobs:
           PY
       - name: Torn API docs (faction balance and money)
         run: |
-          curl -sS -m 30 https://api.torn.com/v2/openapi.json -o spec.json || true
+          for u in https://www.torn.com/swagger/openapi.json https://api.torn.com/v2/openapi.json https://api.torn.com/v2/swagger.json; do curl -sS -m 30 -L "$u" -o spec.json || true; echo "$u: $(head -c 150 spec.json)"; grep -q '"paths"' spec.json && break; done
           python3 - <<'PY'
           import json
           try:
               d = json.load(open("spec.json"))
           except Exception as e:
               print("no spec:", e); raise SystemExit
+          if "paths" not in d:
+              print("not a spec"); raise SystemExit
           print("spec version:", d.get("info", {}).get("version"))
           print("user paths with money/balance/faction:", [p for p in d["paths"] if p.startswith("/user") and any(w in p for w in ("money", "balance", "faction"))])
           sc = d.get("components", {}).get("schemas", {})
