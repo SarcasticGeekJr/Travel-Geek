@@ -87,6 +87,7 @@ export function observe(state, obs) {
   s.name = obs.name || s.name;
 
   if (state.qty > 0 && obs.qty === 0) {
+    s.pfirst = null;
     s.emptySince = mid;
     s.emptyErr = edgeErr;
   } else if (state.qty === 0 && obs.qty > 0) {
@@ -114,9 +115,17 @@ export function observe(state, obs) {
         s.errs = [...(state.errs || []), e].slice(-KEEP_ERRS);
         s.track = [...(state.track || []), [state.pending.at, mid, k > 1 ? k - 1 : 0]].slice(-KEEP_TRACK);
       }
+      // Score Prometheus's guess the same way, to compare the two before using it.
+      if (state.pfirst) {
+        let e = mid - state.pfirst;
+        if (k > 1) e = mid - (state.pfirst + ((k - 1) * v) / k);
+        s.perrs = [...(state.perrs || []), e].slice(-KEEP_ERRS);
+      }
       s.method = bestMethod(s.cycles, s.starts);
     }
     s.amts = [...(state.amts || []), obs.qty].slice(-KEEP_CYCLES);
+    s.pfirst = null;
+    s.pnext = null;
     s.emptySince = null;
     s.emptyErr = null;
     s.pending = null;
@@ -306,6 +315,9 @@ export function buildItems(countries, prices, now, types) {
         emptyN: (s.cycles || []).length,
         track: s.track || [], // [predicted, actual, hidden restocks] for the last few restocks
         hidden: s.hidden || 0,
+        // Prometheus's own guess (being measured, not used yet): its next restock time and its record so far.
+        promNext: s.pnext && s.pnext > now ? s.pnext : null,
+        promScore: s.perrs && s.perrs.length ? { scored: s.perrs.length, hits: s.perrs.filter((e) => Math.abs(e) <= HIT).length } : null,
         topEvery: s.tops && s.tops.length >= 3 ? quant(s.tops.slice(1).map((t, i) => t - s.tops[i]), 0.5) : 0,
         lastTop: s.tops && s.tops.length ? s.tops[s.tops.length - 1] : 0,
         pred: predictRestock(s, now),

@@ -98,7 +98,7 @@ export class Hub extends DurableObject {
     for (const [cc, c] of Object.entries(countries))
       for (const [id, it] of Object.entries(c.items || {}))
         if ((it.cycles && it.cycles.length) || (it.amts && it.amts.length))
-          items.push({ key: `${cc}:${id}`, name: it.name, cycles: it.cycles || [], starts: it.starts || [], amts: it.amts || [], errs: it.errs || [], track: it.track || [], hidden: it.hidden || 0, rate: it.rate || 0, qty: it.qty, emptySince: it.emptySince || null, lastRestock: it.lastRestock || null });
+          items.push({ key: `${cc}:${id}`, name: it.name, cycles: it.cycles || [], starts: it.starts || [], amts: it.amts || [], errs: it.errs || [], perrs: it.perrs || [], track: it.track || [], hidden: it.hidden || 0, rate: it.rate || 0, qty: it.qty, emptySince: it.emptySince || null, lastRestock: it.lastRestock || null });
     return { version: VERSION, now: now(), items };
   }
 
@@ -119,7 +119,14 @@ export class Hub extends DurableObject {
       const pick = a && b ? ((a.update || 0) >= (b.update || 0) ? a : b) : a || b;
       if (pick && pick.update) out[cc] = pick;
     }
-    return { stocks: out, source: [ys && "YATA", ps && "Prometheus"].filter(Boolean).join("+") };
+    // Prometheus also sends its own "nextRestock" guess per item. Kept apart so we can score it against ours.
+    const promNext = {};
+    for (const [cc, c] of Object.entries(ps || {}))
+      for (const x of (c && c.stocks) || []) {
+        const ts = x && x.nextRestock ? Math.floor(Date.parse(x.nextRestock) / 1000) : 0;
+        if (ts > 0 && x.id) (promNext[cc] = promNext[cc] || {})[x.id] = ts;
+      }
+    return { stocks: out, source: [ys && "YATA", ps && "Prometheus"].filter(Boolean).join("+"), promNext };
   }
 
   // Backup timer: the Durable Object wakes itself every minute, so the helper keeps running even when
@@ -189,7 +196,7 @@ export class Hub extends DurableObject {
     if (Object.keys(fixes).length) await this.ctx.storage.put(fixes);
 
     try {
-      const { stocks, source } = await this.readStocks();
+      const { stocks, source, promNext } = await this.readStocks();
       const writes = {};
       for (const [cc, c] of Object.entries(stocks)) {
         if (c.update <= (countries[cc].update || 0)) continue;
@@ -202,6 +209,20 @@ export class Hub extends DurableObject {
         countries[cc] = { update: c.update, items };
         writes["c:" + cc] = countries[cc];
         report.countries++;
+      }
+      // Prometheus's guess for each empty item: remember the first future one of this empty spell (that's what
+      // gets scored, like our own guess made at sell-out) and the latest one (shown later).
+      for (const [cc, m] of Object.entries(promNext || {})) {
+        const c = countries[cc];
+        if (!c || !c.items) continue;
+        for (const [id, ts] of Object.entries(m)) {
+          const it = c.items[id];
+          if (!it || it.qty !== 0 || !it.emptySince) continue;
+          let changed = false;
+          if (!it.pfirst && ts > t && ts > it.emptySince) (it.pfirst = ts), (changed = true);
+          if (it.pnext !== ts) (it.pnext = ts), (changed = true);
+          if (changed) writes["c:" + cc] = c;
+        }
       }
       writes.meta = { tickAt: t, source, cleaned: 2 };
       step("stocks read, writing " + Object.keys(writes).length);

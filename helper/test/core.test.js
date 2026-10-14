@@ -474,3 +474,16 @@ test("big shops are never rolled forward", () => {
   const p = predictRestock(s, 58 * H + 5 * H);
   assert.ok(!p.unseen);
 });
+
+test("Prometheus's guess is scored against the real restock, like ours", () => {
+  const s = smallShop([2 * H, 2 * H, 2 * H, 2 * H]);
+  const t0 = s.at + 60;
+  let x = observe(s, { at: t0, qty: 2, cost: 900000, name: "Neumune Tablet" });
+  x = observe(x, { at: t0 + 120, qty: 0, cost: 900000, name: "Neumune Tablet" });
+  x.pfirst = t0 + 120 + 2 * H + 6 * M; // Prometheus said 6 minutes later than the real one
+  for (let at = t0 + 420; at < t0 + 120 + 2 * H; at += 5 * M) x = observe(x, { at, qty: 0, cost: 900000, name: "Neumune Tablet" });
+  x = observe(x, { at: t0 + 120 + 2 * H, qty: 3, cost: 900000, name: "Neumune Tablet" });
+  assert.equal(x.perrs.length, 1);
+  assert.ok(Math.abs(x.perrs[0] + 6 * M) < 3 * M, String(x.perrs[0] / 60));
+  assert.equal(x.pfirst, null);
+});
