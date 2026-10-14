@@ -158,6 +158,35 @@ export class Hub extends DurableObject {
     const report = { at: t, countries: 0, users: 0, sent: 0, errors: [] };
     let countries = await this.countries();
     step("start");
+    // The helper itself wasn't running for a while (13 Oct: Cloudflare's cron stopped): whatever happened in
+    // that gap wasn't seen, so don't learn empty spells or score predictions across it.
+    const meta0 = await this.ctx.storage.get("meta");
+    const gap = meta0 && meta0.tickAt ? t - meta0.tickAt : 0;
+    const fixes = {};
+    if (gap > 10 * 60) {
+      for (const [cc, c] of Object.entries(countries))
+        for (const it of Object.values(c.items || {})) if (it.qty === 0 && it.emptySince) (it.emptyErr = 9e9), (it.pending = null), (fixes["c:" + cc] = c);
+      report.errors.push(`helper was not running for ${Math.round(gap / 60)} min; empty spells across it are not learned`);
+    }
+    // One-off: drop what the 13 Oct outage taught (cycles and scores over 3x the usual for small fast items).
+    if (!(meta0 && meta0.cleaned >= 1)) {
+      for (const [cc, c] of Object.entries(countries))
+        for (const it of Object.values(c.items || {})) {
+          const cyc = it.cycles || [];
+          if (cyc.length < 4) continue;
+          const sorted = [...cyc].sort((a, b) => a - b);
+          const m = sorted[Math.floor(sorted.length / 2)];
+          const keep = cyc.map((v) => v <= 3.5 * m);
+          if (keep.every(Boolean) && !(it.errs || []).some((e) => Math.abs(e) > 3 * m)) continue;
+          it.cycles = cyc.filter((_, i) => keep[i]);
+          it.starts = (it.starts || []).filter((_, i) => keep[i]);
+          it.errs = (it.errs || []).filter((e) => Math.abs(e) <= 3 * m);
+          it.track = (it.track || []).filter(([p, a]) => Math.abs(a - p) <= 3 * m);
+          fixes["c:" + cc] = c;
+        }
+      fixes.meta = Object.assign({}, meta0, { cleaned: 1 });
+    }
+    if (Object.keys(fixes).length) await this.ctx.storage.put(fixes);
 
     try {
       const { stocks, source } = await this.readStocks();
@@ -174,7 +203,7 @@ export class Hub extends DurableObject {
         writes["c:" + cc] = countries[cc];
         report.countries++;
       }
-      writes.meta = { tickAt: t, source };
+      writes.meta = { tickAt: t, source, cleaned: 1 };
       step("stocks read, writing " + Object.keys(writes).length);
       await this.ctx.storage.put(writes);
       step("stocks saved");

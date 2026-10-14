@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.5.0
+// @version      1.5.1
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -34,7 +34,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.5.0"; // keep in sync with @version above
+  const VERSION = "1.5.1"; // keep in sync with @version above
   // Only one copy runs per page. If another copy got here first (usually an old one that was pasted in or
   // installed twice), say so, because otherwise updates seem to do nothing.
   if (window.__travelGeekLoaded) {
@@ -1594,7 +1594,7 @@
           pr && pr.at
             ? `${pr.overdue || (pr.to && nowS() > pr.to)
               ? `<div>Next restock: <b class="a">late</b> · expected ~${clock(pr.at)} (between ${clock(pr.from)} and ${clock(pr.to)}), still empty. Could be back any minute.</div><div class="muted">When it comes, the helper checks how far off this was and learns from it.</div>`
-              : `<div>Next restock: <b>~${clock(pr.at)}</b> (between ${clock(pr.from)} and ${clock(pr.to)}) · <b>${pr.pct != null ? pr.pct + "% sure" : CONF[pr.conf] + " confidence"}</b></div>`}${trackHtml(it)}<div class="muted">Usually empty for ${dur(pr.avg || 0)} · ${pr.n} restock${pr.n === 1 ? "" : "s"} seen${it.hidden ? ` (${it.hidden} came and went unseen)` : ""}${pr.scored ? ` · last ${pr.scored} predictions: ${pr.hits} within 10 min, usually off by ${dur(pr.err || 0)}` : ""}${pr.methodLabel ? ` · based on ${esc(pr.methodLabel)}` : ""}</div>`
+              : `<div>Next restock: <b>~${clock(pr.at)}</b> (between ${clock(pr.from)} and ${clock(pr.to)}) · <b>${pr.pct != null ? pr.pct + "% sure" : CONF[pr.conf] + " confidence"}</b></div>${pr.unseen ? `<div class="muted">Nothing seen at the expected ~${clock(pr.missedAt)}${pr.unseen > 1 ? ` or the ${pr.unseen - 1} after it` : ""}: a restock of ~${num(PLAN.restockSize(it))} can come and sell out between checks, so this is the next one in its usual ${dur(pr.avg || 0)} cycle.</div>` : ""}`}${trackHtml(it)}<div class="muted">Usually empty for ${dur(pr.avg || 0)} · ${pr.n} restock${pr.n === 1 ? "" : "s"} seen${it.hidden ? ` (${it.hidden} came and went unseen)` : ""}${pr.scored ? ` · last ${pr.scored} predictions: ${pr.hits} within 10 min, usually off by ${dur(pr.err || 0)}` : ""}${pr.methodLabel ? ` · based on ${esc(pr.methodLabel)}` : ""}</div>`
             : it.qty === 0
               ? `<div class="muted">${data.fromHelper ? "Not enough restock history yet. It improves the longer the helper runs." : "Restock predictions need the helper."}</div>`
               : `${trackHtml(it)}${topLine(it)}`

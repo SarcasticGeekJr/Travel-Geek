@@ -62,14 +62,15 @@ const KEEP_TOPS = 20;
 
 // How many restocks an empty spell of length v really was: 2 or 3 when a small, fast-selling restock
 // (gone in under 15 minutes) could have come and gone unseen and v is about 2x or 3x the usual.
-export function hiddenRestocks(state, v) {
-  const c = state.cycles || [];
+export function smallFast(state) {
   const amts = (state.amts || []).slice(-10);
-  if (c.length < 4 || !(state.rate > 0) || !amts.length) return 1;
-  if (Math.max(...amts) / state.rate >= 0.25) return 1; // restocks last a while: we'd have seen them
-  const m = wQuantile(c, 0.5);
+  return (state.cycles || []).length >= 4 && state.rate > 0 && amts.length > 0 && Math.max(...amts) / state.rate < 0.25;
+}
+export function hiddenRestocks(state, v) {
+  if (!smallFast(state)) return 1; // restocks last a while: we'd have seen them
+  const m = wQuantile(state.cycles, 0.5);
   const k = Math.round(v / m);
-  return k >= 2 && k <= 3 && Math.abs(v - k * m) < 0.2 * m ? k : 1;
+  return k >= 2 && k <= 5 && Math.abs(v - k * m) < 0.15 * k * m ? k : 1;
 }
 
 // state: the stored per-item record (or undefined). obs: { qty, cost, name, at, precise } from a provider or a player.
@@ -237,6 +238,16 @@ export function predictRestock(s, now) {
     methodLabel: METHOD_LABEL_PREDICT[method],
     avg: guess,
   };
+  // Tiny restocks often come and go between two looks. Once the window has passed with nothing seen,
+  // expect the next one in the cycle instead of calling it late for hours.
+  if (now > p.to && smallFast(s) && guess > 0) {
+    const k = Math.min(5, Math.ceil((now - p.to) / guess));
+    if (k >= 1) {
+      p.unseen = k;
+      p.missedAt = p.at;
+      for (const f of ["at", "from", "to"]) p[f] += k * guess;
+    }
+  }
   if (now > p.to + 15 * 60) p.overdue = true;
   return p;
 }

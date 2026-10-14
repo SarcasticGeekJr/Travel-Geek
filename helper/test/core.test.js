@@ -448,3 +448,29 @@ test("big top-ups are learned, small sell-backs are not", () => {
   const it = buildItems({ chi: { items: { 276: s } } }, {}, 130 * M).find((x) => x.key === "chi:276");
   assert.ok(it.topEvery > 0 && it.lastTop === 122 * M, JSON.stringify([it.topEvery, it.lastTop]));
 });
+
+test("a tiny restock that's overdue rolls forward to the next expected one instead of staying late", () => {
+  const s = smallShop([2 * H, 2 * H, 2 * H, 2 * H, 2 * H]);
+  // Sold out again; now it's been 5 hours with nothing seen.
+  const t0 = s.at + 60;
+  let x = observe(s, { at: t0, qty: 2, cost: 900000, name: "Neumune Tablet" });
+  x = observe(x, { at: t0 + 120, qty: 0, cost: 900000, name: "Neumune Tablet" });
+  const now = t0 + 120 + 5 * H;
+  const p = predictRestock(x, now);
+  assert.ok(p.unseen >= 2, JSON.stringify(p));
+  assert.ok(p.at > now && p.at - now < 2 * H + 10 * M, `next ${(p.at - now) / 60} min from now`);
+  assert.ok(!p.overdue);
+});
+
+test("four unseen restocks in a row are recognised", () => {
+  const s = smallShop([2 * H, 2 * H, 2 * H, 2 * H, 2 * H, 8 * H + 8 * M]);
+  assert.equal(s.hidden, 3);
+});
+
+test("big shops are never rolled forward", () => {
+  let s;
+  for (const [at, qty] of [[0, 5000], [300, 4990], [10 * H, 0], [10 * H + 300, 0], [12 * H, 5000], [12 * H + 300, 4990], [22 * H, 0], [22 * H + 300, 0], [24 * H, 5000], [24 * H + 300, 4990], [34 * H, 0], [34 * H + 300, 0], [36 * H, 5000], [36 * H + 300, 4990], [46 * H, 0], [46 * H + 300, 0], [48 * H, 5000], [48 * H + 300, 4990], [58 * H, 0]])
+    s = observe(s, { at, qty, cost: 1000, name: "Peony" });
+  const p = predictRestock(s, 58 * H + 5 * H);
+  assert.ok(!p.unseen);
+});
