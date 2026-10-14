@@ -98,7 +98,7 @@ export class Hub extends DurableObject {
     for (const [cc, c] of Object.entries(countries))
       for (const [id, it] of Object.entries(c.items || {}))
         if ((it.cycles && it.cycles.length) || (it.amts && it.amts.length))
-          items.push({ key: `${cc}:${id}`, name: it.name, cycles: it.cycles || [], starts: it.starts || [], amts: it.amts || [], errs: it.errs || [], rate: it.rate || 0, qty: it.qty, emptySince: it.emptySince || null, lastRestock: it.lastRestock || null });
+          items.push({ key: `${cc}:${id}`, name: it.name, cycles: it.cycles || [], starts: it.starts || [], amts: it.amts || [], errs: it.errs || [], track: it.track || [], hidden: it.hidden || 0, rate: it.rate || 0, qty: it.qty, emptySince: it.emptySince || null, lastRestock: it.lastRestock || null });
     return { version: VERSION, now: now(), items };
   }
 
@@ -169,7 +169,7 @@ export class Hub extends DurableObject {
       report.errors.push(`helper was not running for ${Math.round(gap / 60)} min; empty spells across it are not learned`);
     }
     // One-off: drop what the 13 Oct outage taught (cycles and scores over 3x the usual for small fast items).
-    if (!(meta0 && meta0.cleaned >= 1)) {
+    if (!(meta0 && meta0.cleaned >= 2)) {
       for (const [cc, c] of Object.entries(countries))
         for (const it of Object.values(c.items || {})) {
           const cyc = it.cycles || [];
@@ -177,14 +177,14 @@ export class Hub extends DurableObject {
           const sorted = [...cyc].sort((a, b) => a - b);
           const m = sorted[Math.floor(sorted.length / 2)];
           const keep = cyc.map((v) => v <= 3.5 * m);
-          if (keep.every(Boolean) && !(it.errs || []).some((e) => Math.abs(e) > 3 * m)) continue;
+          if (keep.every(Boolean) && !(it.errs || []).some((e) => Math.abs(e) > 2.5 * m)) continue;
           it.cycles = cyc.filter((_, i) => keep[i]);
           it.starts = (it.starts || []).filter((_, i) => keep[i]);
-          it.errs = (it.errs || []).filter((e) => Math.abs(e) <= 3 * m);
-          it.track = (it.track || []).filter(([p, a]) => Math.abs(a - p) <= 3 * m);
+          it.errs = (it.errs || []).filter((e) => Math.abs(e) <= 2.5 * m);
+          it.track = (it.track || []).filter(([p, a]) => Math.abs(a - p) <= 2.5 * m);
           fixes["c:" + cc] = c;
         }
-      fixes.meta = Object.assign({}, meta0, { cleaned: 1 });
+      fixes.meta = Object.assign({}, meta0, { cleaned: 2 });
     }
     if (Object.keys(fixes).length) await this.ctx.storage.put(fixes);
 
@@ -203,7 +203,7 @@ export class Hub extends DurableObject {
         writes["c:" + cc] = countries[cc];
         report.countries++;
       }
-      writes.meta = { tickAt: t, source, cleaned: 1 };
+      writes.meta = { tickAt: t, source, cleaned: 2 };
       step("stocks read, writing " + Object.keys(writes).length);
       await this.ctx.storage.put(writes);
       step("stocks saved");
