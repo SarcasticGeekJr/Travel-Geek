@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.6.1
+// @version      1.6.2
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -34,7 +34,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.6.1"; // keep in sync with @version above
+  const VERSION = "1.6.2"; // keep in sync with @version above
   // Only one copy runs per page. If another copy got here first (usually an old one that was pasted in or
   // installed twice), say so, because otherwise updates seem to do nothing.
   if (window.__travelGeekLoaded) {
@@ -2514,7 +2514,7 @@
     const p = S.fab;
     if (!p) {
       fab.style.right = "14px";
-      fab.style.bottom = "146px"; // above Bazaar Plus's 🛒
+      fab.style.bottom = "208px"; // above Bazaar Plus 🛒 (84px) and Torn Watch Geek 👁 (146px)
       return;
     }
     fab.style.right = Math.min(Math.max(4, p.right), innerWidth - 56) + "px";
@@ -2607,7 +2607,7 @@ button { font: inherit; cursor: pointer; }
   --bg: #1d1f22; --bg2: #26292d; --bg3: #30343a; --line: #3a3f46; --text: #e9ecef; --muted: #9aa3ad;
   --acc: #74c0fc; --g: #7fdc6f; --r: #ff8787; --amber: #ffd43b;
 }
-.fab { position: fixed; right: 14px; bottom: 146px; z-index: 2147483000; width: 52px; height: 52px; border-radius: 50%;
+.fab { position: fixed; right: 14px; bottom: 208px; z-index: 2147483000; width: 52px; height: 52px; border-radius: 50%;
   border: 1px solid var(--line); background: var(--bg2); color: var(--text); box-shadow: 0 4px 14px rgba(0,0,0,.45);
   display: flex; align-items: center; justify-content: center; font-size: 24px; -webkit-tap-highlight-color: transparent;
   touch-action: none; user-select: none; -webkit-user-select: none; }
