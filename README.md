@@ -18,16 +18,17 @@ https://raw.githubusercontent.com/SarcasticGeekJr/Travel-Geek/main/travel-geek.u
 
 Tells you which trips to make, in order, for the most profit in the time you have, with the money you can actually use.
 
+- **NEXT card at the top:** just what to do next, for example "leave 1:20 pm → UAE · Buy 27 × Tribulus · take $162k · Likely +$1.1m (up to $1.37m) · very likely", with ⏰ Remind me. The whole day is folded below ("See full day").
+- **Chances in words:** very likely, likely, coin flip, long shot. "Likely +$X" is what a trip makes on average; "up to" is when everything goes right.
+- **Always "leave … → land …"**, so leave and landing times can't be mixed up.
 - **Round trips only** (Torn → country → Torn), timed to **land at a restock**. It never plans for you to wait abroad.
-- **Start:** now, or a time you pick. If you're abroad, flying or in hospital, it starts when you're back.
-- **Play for:** 4 hours by default, or 1–12 hours, a whole day (24 hours), or until a time you choose. Far countries (Japan, China, UAE, South Africa) take 5–6.6 hours there and back, so they only show up in plans of 6 hours or more.
-- **Money I can use:** your wallet, vault, stocks and faction balance (points optional), read from the Torn API. Untick any of them, set a "don't spend more than", or type your own number. Plans only buy what you can afford, and each trip says where to get the cash first ("get $7.3m: Vault $6.1m, Faction $1.2m"). It never moves money for you.
-- **Between trips:** "Don't sell" (pay for every trip from today's money) or "Sell" (profits pay for the next trip).
-- **Business tickets I have:** 0 by default. Enter how many you have and it uses one only on a trip where the extra profit beats the ticket's price.
-- **Expected vs best case:** "best case" assumes every restock arrives as predicted; "expected" counts how often predictions have really been right, and how much of the day each shop is stocked (big shops that take hours to sell out are almost always stocked, even far ahead). Plans are ranked by expected profit.
-- **Live:** countdowns tick every second and the plan is recalculated every minute. If the best plan changes, it says why.
-- **⏰ Remind me for each trip** (Torn PDA) and **🔔 Follow this plan** (a phone alert before each departure).
-- **"With $X you'd make +$Y more"** when more money would help.
+- **I can leave from:** now or a time you pick. If you're abroad, flying or in hospital, it starts when you're back.
+- **Play for:** 1–12 hours, a whole day, or until a time.
+- **Prefer:** **Steady** (the most money on average) or **Bigger wins** (trips that pay most when they work, as long as they work at least about 1 time in 3).
+- **Why not …?** For the big earner that isn't in your plan (like Xanax), one tap shows when it would be there, its chance, and how it compares. **Plan around it** builds the day with that trip in it.
+- **No tiny filler trips:** trips under $200k (change it in Plan options) are left out, and free time shows as "☕ Free 7:02 – 7:38 pm".
+- **Calm updates:** the plan only changes when a new one is at least 10% better or the old one stopped working, and it says why.
+- **⚙ Plan options** (folded): items you carry, money you can use (wallet, vault, stocks, faction, points), sell between trips or not, Business tickets, skip trips under.
 
 ## What it does
 

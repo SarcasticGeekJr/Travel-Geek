@@ -163,3 +163,43 @@ test("a whole-day plan chains several long trips", () => {
   assert.ok(r.best.legs.length >= 4, `expected 4+ China trips in 24h, got ${r.best.legs.length}`);
   assert.ok(r.best.exp > 0.6 * r.best.best, "expected profit should stay close to best case");
 });
+
+// Two choices like Xanax (pays more, often sold out) vs Tribulus (pays a bit less, almost always there).
+const risky = () => [
+  item({ cc: "jap", id: 206, name: "Xanax", qty: 0, cost: 750000, sell: 875000, type: "Drug", rate: 2400, amtTypical: 2500, emptyAvg: 2 * H, emptyN: 10, pred: { at: NOW + 149 * M + 5 * M, from: NOW + 140 * M, to: NOW + 170 * M, pct: 45 } }),
+  item({ cc: "chi", id: 276, name: "Peony", qty: 9000, cost: 5000, sell: 50000, type: "Flower", rate: 1000, amtTypical: 10000, emptyAvg: 30 * M, emptyN: 8 }),
+];
+
+test("steady picks the safer trip, bigger wins picks the one that pays more when it works", () => {
+  const steady = PLAN.make(base(risky(), { end: NOW + 6 * H }));
+  const bold = PLAN.make(base(risky(), { end: NOW + 6 * H, prefer: "bold" }));
+  assert.equal(steady.best.legs[0].cc, "chi");
+  assert.equal(bold.best.legs[0].cc, "jap");
+});
+
+test("trips under the minimum are left out", () => {
+  const items = [item({ cc: "mex", id: 258, name: "Jaguar Plushie", qty: 5000, cost: 10000, sell: 13000, rate: 100 })];
+  assert.ok(PLAN.make(base(items)).best);
+  assert.equal(PLAN.make(base(items, { minLeg: 200000 })).best, null);
+});
+
+test("the shown plan is kept unless a new one is clearly better", () => {
+  const first = PLAN.make(base(risky(), { end: NOW + 6 * H }));
+  const again = PLAN.make(base(risky(), { end: NOW + 6 * H, keepSig: first.sig }));
+  assert.equal(again.sig, first.sig);
+  // A sig that no longer exists is reported, so the screen can say why it changed.
+  const gone = PLAN.make(base(risky(), { end: NOW + 6 * H, keepSig: "uae@1" }));
+  assert.ok(gone.prevGone);
+});
+
+test("plan around an item puts that item in the plan", () => {
+  const r = PLAN.make(base(risky(), { end: NOW + 8 * H, pin: "jap:206" }));
+  assert.ok(r.pinned && r.pinned.legs.some((g) => g.buys.some((b) => b.key === "jap:206")));
+});
+
+test("item windows give the leave times when it should be there on landing", () => {
+  const [x] = risky();
+  const w = PLAN.itemWindows(x, NOW, NOW + 8 * H, 149 * M, NOW);
+  assert.ok(w.length >= 1);
+  assert.ok(w[0].from <= NOW + 10 * M && w[0].to >= NOW, JSON.stringify(w[0]));
+});
