@@ -49,7 +49,7 @@ jobs:
       - name: Restock history (for testing prediction methods)
         run: |
           curl -sS -m 30 "https://travel-geek.sakthiramkumar12.workers.dev/api/history" | python3 -c "import json,sys; d=json.load(sys.stdin); print('HISTORY-JSON', json.dumps(d, separators=(',', ':')))" || true
-      - name: What the stock sources send for Switzerland (raw)
+      - name: What the stock sources send (raw costs)
         run: |
           for u in https://api.prombot.co.uk/api/travel https://yata.yt/api/v1/travel/export/; do
             echo "== $u"
@@ -58,11 +58,9 @@ jobs:
           import json
           d = json.load(open('src.json'))
           print('top-level keys:', list(d.keys())[:10])
-          s = (d.get('stocks') or {}).get('swi') or {}
-          print('swi keys:', list(s.keys()))
-          for x in (s.get('stocks') or []):
-              if 'Neumune' in str(x.get('name')) or x.get('id') == 361: print('Neumune entry:', json.dumps(x))
-          print('first entry:', json.dumps((s.get('stocks') or [{}])[0]))
+          for cc, s in (d.get('stocks') or {}).items():
+              for x in (s.get('stocks') or []):
+                  if 'Latex' in str(x.get('name')) or 'Neumune' in str(x.get('name')) or (float(x.get('cost') or 0) < 1000): print(cc, s.get('update'), json.dumps(x))
           " || head -c 300 src.json
           done
       - name: Full state (for replaying the planner)
