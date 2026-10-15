@@ -198,6 +198,9 @@ export class Hub extends DurableObject {
     try {
       const { stocks, source, promNext } = await this.readStocks();
       const writes = {};
+      // One-off: shop reports from 1.6.2 and older could carry a wrong price, so restart each country's usual
+      // price from the stock sources the first time that country updates.
+      const costFixed = (meta0 && meta0.costFixed) || [];
       for (const [cc, c] of Object.entries(stocks)) {
         if (c.update <= (countries[cc].update || 0)) continue;
         const prev = (await this.ctx.storage.get("c:" + cc)) || countries[cc]; // a shop report may have landed meanwhile
@@ -205,7 +208,9 @@ export class Hub extends DurableObject {
         for (const s of c.stocks || []) {
           if (!s || !s.id) continue;
           items[s.id] = observe(items[s.id], { qty: +s.quantity || 0, cost: +s.cost || 0, name: s.name, at: c.update });
+          if (!costFixed.includes(cc) && +s.cost > 0) items[s.id].costAvg = items[s.id].cost = +s.cost;
         }
+        if (!costFixed.includes(cc)) costFixed.push(cc);
         countries[cc] = { update: c.update, items };
         writes["c:" + cc] = countries[cc];
         report.countries++;
@@ -224,7 +229,7 @@ export class Hub extends DurableObject {
           if (changed) writes["c:" + cc] = c;
         }
       }
-      writes.meta = { tickAt: t, source, cleaned: 2 };
+      writes.meta = { tickAt: t, source, cleaned: 2, costFixed };
       step("stocks read, writing " + Object.keys(writes).length);
       await this.ctx.storage.put(writes);
       step("stocks saved");
@@ -410,7 +415,9 @@ export class Hub extends DurableObject {
     for (const i of list) {
       const prev = items[i.id];
       if (!prev) continue; // only items the stock sources know, so a bad report can't add junk
-      items[i.id] = observe(prev, { qty: Math.round(+i.qty), cost: Math.round(+i.cost) || prev.cost, name: prev.name, at: t, precise: true });
+      // Only the stock count is taken from a shop report. Prices come from the stock sources: reading them off the
+      // page can pick up another script's number (e.g. a profit column).
+      items[i.id] = observe(prev, { qty: Math.round(+i.qty), cost: 0, name: prev.name, at: t, precise: true });
       n++;
     }
     await this.ctx.storage.put("c:" + cc, { ...c, items });

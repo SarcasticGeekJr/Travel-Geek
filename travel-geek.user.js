@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travel Geek
 // @namespace    https://github.com/SarcasticGeekJr/Travel-Geek
-// @version      1.6.2
+// @version      1.6.3
 // @description  Best things to buy abroad right now for your own setup, when to leave so you land at the restock, and phone alerts (ntfy) even when Torn PDA is closed. Built for Torn PDA, works in Tampermonkey too.
 // @author       SarcasticGeekJr
 // @match        https://www.torn.com/*
@@ -34,7 +34,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.6.2"; // keep in sync with @version above
+  const VERSION = "1.6.3"; // keep in sync with @version above
   // Only one copy runs per page. If another copy got here first (usually an old one that was pasted in or
   // installed twice), say so, because otherwise updates seem to do nothing.
   if (window.__travelGeekLoaded) {
@@ -2209,7 +2209,9 @@
         qty = -1;
       el.querySelectorAll("span").forEach((sp) => {
         const t = sp.textContent.trim();
-        if (t.includes("$") && sp.getAttribute("aria-hidden") !== "true") cost = parseMoney(t) || +t.replace(/[^0-9]/g, "") || cost;
+        // Torn's price is the first "$" on the row; later ones can be other scripts' columns (e.g. profit).
+        if (!cost && t.includes("$") && sp.getAttribute("aria-hidden") !== "true" && !/profit/i.test(sp.className + " " + (sp.parentElement ? sp.parentElement.className : "")))
+          cost = parseMoney(t) || +t.replace(/[^0-9]/g, "") || 0;
         if (/stock/i.test(t) && sp.parentElement) qty = +sp.parentElement.textContent.replace(/[^0-9]/g, "") || 0;
       });
       rows.push({ id, cost, qty: qty < 0 ? 0 : qty, el });
@@ -2242,7 +2244,9 @@
     const capInfo = shopCapacity();
     const capLeft = capInfo ? capInfo.cap - capInfo.used : capFor(myMethod());
     const money = walletOnPage();
-    const afford = money != null && row.cost > 0 ? Math.floor(money / row.cost) : Infinity;
+    const known = findItem(cc + ":" + row.id);
+    const price = (known && known.cost) || row.cost; // the stock sources' price is the reliable one
+    const afford = money != null && price > 0 ? Math.floor(money / price) : Infinity;
     const planned = plannedUnits(cc, row.id);
     const n = Math.min(planned != null ? planned : capLeft, capLeft, row.qty > 0 ? row.qty : Infinity, afford);
     return { n: Math.max(0, n), planned };
@@ -2269,7 +2273,7 @@
     // 2. Exact stock to the helper, at most about once a minute.
     if (cc && helperUrl() && apiKey() && nowS() - shopReportAt > 70) {
       shopReportAt = nowS();
-      httpSend("POST", helperUrl() + "/api/report", { key: apiKey(), cc, items: rows.filter((r) => r.cost > 0).map((r) => ({ id: r.id, qty: r.qty, cost: r.cost })) }).catch(() => {});
+      httpSend("POST", helperUrl() + "/api/report", { key: apiKey(), cc, items: rows.map((r) => ({ id: r.id, qty: r.qty })) }).catch(() => {});
     }
     // 3. Fill buttons next to each Buy button, and a green outline on items in your plan.
     for (const r of rows) {

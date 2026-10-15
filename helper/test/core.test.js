@@ -487,3 +487,11 @@ test("Prometheus's guess is scored against the real restock, like ours", () => {
   assert.ok(Math.abs(x.perrs[0] + 6 * M) < 3 * M, String(x.perrs[0] / 60));
   assert.equal(x.pfirst, null);
 });
+
+test("a shop report without a price keeps the known price and usual price", () => {
+  let s = observe(undefined, { qty: 100, cost: 220000, name: "Bonded Latex", at: 1000 });
+  s = observe(s, { qty: 90, cost: 0, name: "Bonded Latex", at: 1100, precise: true });
+  assert.equal(s.cost, 220000);
+  assert.equal(s.costAvg, 220000);
+  assert.equal(s.qty, 90);
+});
